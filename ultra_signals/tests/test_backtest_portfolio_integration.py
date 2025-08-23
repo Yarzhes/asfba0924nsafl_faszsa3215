@@ -7,13 +7,17 @@ from ultra_signals.backtest.data_adapter import DataAdapter
 def mock_settings():
     """Provides mock settings for the backtest."""
     return {
-        "initial_capital": 10000.0,
-        "start_date": "2023-01-01",
-        "end_date": "2023-01-02",
-        "default_size_pct": 0.01,
-        # Portfolio settings that will be used by evaluate_portfolio
+        "backtest": {
+            "start_date": "2023-01-01",
+            "end_date": "2023-01-02",
+            "execution": {
+                "initial_capital": 10000.0,
+                "default_size_pct": 0.01,
+            }
+        },
         "portfolio": {
-            "max_positions_total": 1,
+            "max_total_positions": 1,
+            "max_positions_per_symbol": 1,
             "max_net_long_risk": 0.015, # Allow one trade, but not two
         },
         "features": {
@@ -22,6 +26,13 @@ def mock_settings():
             "momentum": {},
             "volatility": {},
             "volume_flow": {}
+        },
+        "runtime": {
+            "symbols": ["TEST_ETH"],
+            "primary_timeframe": "1h"
+        },
+        "reports": {
+            "output_dir": "reports/test_run"
         }
     }
 
@@ -54,12 +65,13 @@ def test_event_runner_gates_trade_on_max_positions(mock_settings, mock_data_adap
     # The mock signal engine will generate a LONG signal at every bar.
     # The first one should be executed.
     # The second one should be vetoed by the portfolio evaluation.
-    trades, _ = runner.run("TEST_ETH", "1h")
+    trades, equity_curve = runner.run("TEST_ETH", "1h")
     
     # Only the first trade should have been executed
     assert len(trades) == 1
     assert len(runner.risk_events) > 0
     assert any(e.reason == "MAX_POSITIONS_TOTAL" for e in runner.risk_events), "MAX_POSITIONS_TOTAL event not found"
+    assert equity_curve is not None
 
 def test_event_runner_downsizes_trade(mock_settings, mock_data_adapter):
     """

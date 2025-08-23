@@ -53,7 +53,7 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
         warmup = 2
     feature_store = FeatureStore(warmup_periods=warmup, settings=settings.model_dump())
     signal_engine = RealSignalEngine(settings.model_dump(), feature_store)
-    runner = EventRunner(settings.backtest.model_dump(), adapter, signal_engine, feature_store)
+    runner = EventRunner(settings.model_dump(), adapter, signal_engine, feature_store)
     
     # For now, we run on the first symbol specified in runtime config
     symbol = settings.runtime.symbols[0]
@@ -63,17 +63,7 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
     
     if trades:
         trades_df = pd.DataFrame(trades)
-        equity_df = pd.DataFrame(equity)
-
-        # Only set an index if we actually have that column
-        if not equity_df.empty and "timestamp" in equity_df.columns:
-            equity_df = equity_df.set_index(pd.to_datetime(equity_df["timestamp"]))
-            equity_curve = equity_df["equity"]
-        else:
-            # keep a consistent shape so downstream code doesn't crash
-            equity_df = pd.DataFrame(columns=["timestamp", "equity"])
-            equity_curve = pd.Series(dtype="float64", name="equity")
-
+        
         kpis = compute_kpis(trades_df)
         
         report_settings = settings.reports.model_dump()
@@ -81,10 +71,12 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
             report_settings["output_dir"] = args.output_dir
         
         reporter = ReportGenerator(report_settings)
-        reporter.generate_report(kpis, equity_curve, trades_df)
+        reporter.generate_report(kpis, equity, trades_df) # Pass raw equity list
         logger.success(f"Backtest finished. Report generated in {report_settings['output_dir']}.")
     else:
         logger.warning("Backtest finished with no trades.")
+        # Return non-zero exit code if no trades
+        exit(1)
 
 
 def handle_wf(args: argparse.Namespace, settings: Any) -> None:
@@ -189,6 +181,8 @@ def create_parser() -> argparse.ArgumentParser:
         help="Execute a single backtest over a specified period.",
         parents=[common_parser],
     )
+    parser_run.add_argument("--symbol", type=str, help="Symbol to backtest (e.g., BTCUSDT). Overrides config.")
+    parser_run.add_argument("--interval", type=str, help="Candle interval (e.g., 5m). Overrides config.")
     parser_run.add_argument("--start", type=str, help="Backtest start date (YYYY-MM-DD). Overrides config.")
     parser_run.add_argument("--end", type=str, help="Backtest end date (YYYY-MM-DD). Overrides config.")
     parser_run.add_argument("--output-dir", type=str, help="Directory to save backtest report.")

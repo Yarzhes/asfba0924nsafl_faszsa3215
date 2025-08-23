@@ -6,43 +6,57 @@ from ultra_signals.core.custom_types import TradeRecord, EquityDataPoint, Reliab
 def compute_kpis(trades_df: pd.DataFrame) -> Dict[str, Any]:
     """Computes key performance indicators from a DataFrame of trades."""
     if trades_df.empty:
-        return {"error": "No trades to analyze."}
+        return {
+            "total_trades": 0,
+            "win_rate": 0.0,
+            "avg_pnl": 0.0,
+            "total_pnl": 0.0,
+            "max_drawdown": 0.0,
+            "sharpe": 0.0,
+            "avg_hold_bars": 0.0,
+        }
 
-    pnl = trades_df['pnl']
-    total_pnl = pnl.sum()
     total_trades = len(trades_df)
+    total_pnl = trades_df["pnl"].sum()
     
-    wins = trades_df[pnl > 0]
-    losses = trades_df[pnl <= 0]
+    wins = trades_df[trades_df["pnl"] > 0]
+    win_rate = len(wins) / total_trades if total_trades > 0 else 0.0
     
-    win_rate = len(wins) / total_trades if total_trades > 0 else 0
-    avg_win = wins['pnl'].mean() if len(wins) > 0 else 0
-    avg_loss = losses['pnl'].mean() if len(losses) > 0 else 0
-    
-    profit_factor = abs(wins['pnl'].sum() / losses['pnl'].sum()) if losses['pnl'].sum() != 0 else np.inf
-    
-    # Simplified Sharpe Ratio (assuming risk-free rate is 0)
-    sharpe_ratio = pnl.mean() / pnl.std() if pnl.std() != 0 else 0
-    
+    avg_pnl = trades_df["pnl"].mean()
+    avg_hold_bars = trades_df["hold_bars"].mean() if "hold_bars" in trades_df.columns else 0.0
+
+    # Max Drawdown
+    equity_curve = trades_df["pnl"].cumsum()
+    max_equity = equity_curve.expanding().max()
+    drawdown = max_equity - equity_curve
+    max_drawdown = drawdown.max()
+
+    # Sharpe Ratio (simplified, dailyized proxy)
+    # Assuming pnl is per-trade, not daily. For a true Sharpe, need daily returns.
+    # Here, we'll use trade-level pnl std dev.
+    sharpe = trades_df["pnl"].mean() / trades_df["pnl"].std() if trades_df["pnl"].std() != 0 else 0.0
+    # Annualize if trades represent daily periods (rough approximation)
+    # sharpe *= np.sqrt(252)
+
     return {
-        "total_pnl": total_pnl,
         "total_trades": total_trades,
-        "win_rate_pct": win_rate * 100,
-        "profit_factor": profit_factor,
-        "sharpe_ratio": sharpe_ratio * np.sqrt(252), # Annualized
-        "average_win": avg_win,
-        "average_loss": avg_loss,
+        "win_rate": win_rate,
+        "avg_pnl": avg_pnl,
+        "total_pnl": total_pnl,
+        "max_drawdown": max_drawdown,
+        "sharpe": sharpe,
+        "avg_hold_bars": avg_hold_bars,
     }
 
-def generate_equity_curve(trades_df: pd.DataFrame, initial_capital: float = 10000.0) -> pd.Series:
-    """Generates an equity curve from trades."""
-    if trades_df.empty:
-        return pd.Series([initial_capital], index=[pd.Timestamp.now()])
-        
-    pnl_curve = trades_df['pnl'].cumsum()
-    equity_curve = initial_capital + pnl_curve
-    equity_curve.index = trades_df['exit_time']
-    return equity_curve
+def generate_equity_curve(equity_data: List[Dict]) -> pd.Series:
+    """Generates an equity curve from a list of equity data points."""
+    if not equity_data:
+        return pd.Series([], dtype=float)
+    
+    df = pd.DataFrame(equity_data)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.set_index("timestamp")
+    return df["equity"]
 
 def calculate_brier_score(y_true, y_prob):
     """Calculates the Brier score for reliability."""

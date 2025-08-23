@@ -1,7 +1,8 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
+from ultra_signals.backtest.metrics import generate_equity_curve
 
 class ReportGenerator:
     """Generates and saves backtest reports and artifacts."""
@@ -13,7 +14,7 @@ class ReportGenerator:
     def generate_report(
         self,
         kpis: Dict[str, Any],
-        equity_curve: pd.Series,
+        equity_data: List[Dict], # Changed to list of dicts
         trades: pd.DataFrame
     ):
         """
@@ -24,6 +25,7 @@ class ReportGenerator:
         self._save_kpis(kpis)
         
         # 2. Save equity curve plot
+        equity_curve = generate_equity_curve(equity_data) # Use the new function
         self._save_equity_curve_plot(equity_curve)
         
         # 3. Save trades to CSV
@@ -38,7 +40,11 @@ class ReportGenerator:
             f.write("Backtest Performance Summary\n")
             f.write("="*30 + "\n")
             for key, value in kpis.items():
-                f.write(f"{key}: {value:.4f}\n" if isinstance(value, float) else f"{key}: {value}\n")
+                # Format floats to 2 decimal places, others as is
+                if isinstance(value, float):
+                    f.write(f"{key}: {value:.2f}\n")
+                else:
+                    f.write(f"{key}: {value}\n")
 
     def _save_equity_curve_plot(self, equity_curve: pd.Series):
         """Generates and saves a plot of the equity curve."""

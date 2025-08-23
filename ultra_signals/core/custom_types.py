@@ -212,6 +212,8 @@ class Position(BaseModel):
     entry: float
     risk: float
     cluster: str
+    entry_price: float = 0.0
+    bars_held: int = 0
 
 
 class PortfolioState(BaseModel):

@@ -107,3 +107,23 @@ class RealSignalEngine:
                 logger.debug(f"Final Decision for {symbol} at {timestamp}: FLAT (Vote Detail: {final_decision.vote_detail})")
         
         return final_decision
+
+    def should_exit(self, symbol, pos, bar, features):
+        px = bar["close"]
+        atr = getattr(features.get("volatility"), "atr", None) or 0
+        # Default multipliers if not already on the position/config
+        k_stop = getattr(pos, "atr_mult_stop", 2.0)
+        k_tp   = getattr(pos, "atr_mult_tp",   3.0)
+        max_bars = getattr(pos, "max_bars", 288)  # e.g., 24h on 5m bars
+
+        if pos.side == "LONG":
+            if atr and px <= pos.entry_price - k_stop*atr: return "STOP"
+            if atr and px >= pos.entry_price + k_tp*atr:   return "TP"
+        else:  # SHORT
+            if atr and px >= pos.entry_price + k_stop*atr: return "STOP"
+            if atr and px <= pos.entry_price - k_tp*atr:   return "TP"
+
+        # Time stop
+        if pos.bars_held >= max_bars:
+            return "TIME_STOP"
+        return None

@@ -1,0 +1,218 @@
+# Ultra-Signals Settings - v0.1
+
+# --------------------------------------------------------------------------------
+# DATA SOURCES
+#
+# Configuration for data providers. For now, only Binance USD-M Futures.
+# --------------------------------------------------------------------------------
+data_sources:
+  binance_usdm:
+    api_key: "YOUR_BINANCE_API_KEY"      # Optional, can be set via ENV: BINANCE_API_KEY
+    api_secret: "YOUR_BINANCE_API_SECRET" # Optional, can be set via ENV: BINANCE_API_SECRET
+
+# --------------------------------------------------------------------------------
+# RUNTIME SETTINGS
+#
+# Core behavior of the application runner.
+# --------------------------------------------------------------------------------
+runtime:
+  # Symbols to subscribe to. Must be valid Binance USD-M perpetual futures symbols.
+  # Example: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+  symbols:
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "BNBUSDT"
+
+  # Kline timeframes to subscribe to for each symbol.
+  # Valid values: "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"
+  timeframes:
+    - "1m"
+    - "5m"
+
+  # Base timeframe for primary signal generation. Must be in the `timeframes` list.
+  primary_timeframe: "5m"
+  
+  # Backoff delay in milliseconds for websocket reconnect attempts.
+  reconnect_backoff_ms: 2000
+
+# --------------------------------------------------------------------------------
+# FEATURE COMPUTATION
+#
+# Parameters for calculating technical indicators.
+# --------------------------------------------------------------------------------
+features:
+  # Number of kline bars required before starting any computation.
+  warmup_periods: 200
+
+  # Parameters for `features/trend.py`
+  trend:
+    ema_short: 20
+    ema_medium: 50
+    ema_long: 200
+
+  # Parameters for `features/momentum.py`
+  momentum:
+    rsi_period: 14
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+
+  # Parameters for `features/volatility.py`
+  volatility:
+    atr_period: 14
+    bbands_period: 20
+    bbands_stddev: 2
+    
+  # Parameters for `features/volume_flow.py`
+  volume_flow:
+    vwap_window: 20
+    vwap_std_devs: [1.0, 2.0] # Which standard deviation bands to calculate
+    volume_z_window: 50
+
+# --------------------------------------------------------------------------------
+# DERIVATIVES, REGIME & SCORING
+#
+# New sections for derivatives, regime classification, and adaptive scoring.
+# --------------------------------------------------------------------------------
+derivatives:
+  funding_trail_len: 8         # count
+  funding_refresh_sec: 900     # REST trail refresh cadence
+  oi:
+    enabled: true
+    provider: "mock"           # "coinglass"|"coinalyze"|"mock"
+    refresh_sec: 60
+  liq_pulse:
+    window_sec: 300
+    notional_weight: 1.0       # blend count & notional
+regime:
+  hysteresis_bars: 3
+  adx_min_trend: 15
+  atr_percentile_windows: 200  # lookback
+  variance_ratio_window: 20
+weights_profiles:
+  trend:       {trend: .30, momentum: .22, volatility: .08, flow: .18, orderbook: .08, derivatives: .14}
+  mean_revert: {trend: .15, momentum: .22, volatility: .13, flow: .22, orderbook: .13, derivatives: .15}
+  chop:        {trend: .10, momentum: .20, volatility: .20, flow: .25, orderbook: .15, derivatives: .10}
+filters:
+  avoid_funding_minutes: 5
+
+# --------------------------------------------------------------------------------
+# ENGINE - SCORING, RISK & SIZING
+#
+# Logic for how signals are generated and managed.
+# --------------------------------------------------------------------------------
+engine:
+  # Weights for combining component scores into a final signal score.
+  # Must sum to 1.0.
+  # DEPRECATED in favor of weights_profiles
+  scoring_weights:
+    trend: 0.5
+    momentum: 0.5
+    volatility: 0.0
+
+  # Thresholds for generating entry/exit signals based on the final score.
+  thresholds:
+    enter: 0.1  # Score must be >= this value to generate a LONG or SHORT signal
+    exit: 0.4   # Score must be <= this value to generate an opposite EXIT signal
+
+  # Risk management filters.
+  risk:
+    # How many minutes before/after a funding event to block signals.
+    # Set to 0 to disable.
+    # Max spread (Best Ask - Best Bid) / Price, as a percentage.
+    # Signals are blocked if spread exceeds this value.
+    # You can set a "default" and override it for specific symbols.
+    max_spread_pct:
+      default: 0.06
+      "1000SHIBUSDT": 0.1 # Example of a higher spread allowance for a less liquid asset
+
+# --------------------------------------------------------------------------------
+# SPRINT 7 ADDITIONS
+# --------------------------------------------------------------------------------
+ensemble:
+  min_score: 0.1
+  min_score: 0.05
+  majority_threshold: 0.50
+  veto_trend_flip: true
+  veto_band_pierce: true
+
+correlation:
+  enabled: true
+  lookback_periods: 200
+  cluster_threshold: 0.7
+  hysteresis: 0.1
+  refresh_interval_bars: 50
+
+portfolio:
+  max_exposure_per_symbol: 1000.0
+  max_exposure_per_cluster: 3000.0
+  max_net_exposure: 5000.0
+  max_margin_pct: 50.0
+  max_total_positions: 10
+
+brakes:
+  min_spacing_sec_cluster: 300
+  daily_loss_soft_limit_pct: 2.0
+  daily_loss_hard_limit_pct: 4.0
+  streak_cooldown_trades: 3
+  streak_cooldown_hours: 12
+
+sizing:
+  vol_risk_scale_pct: 0.5
+
+# --------------------------------------------------------------------------------
+# FUNDING RATE PROVIDER
+#
+# Configuration for the service that provides historical funding rate data.
+# --------------------------------------------------------------------------------
+funding_rate_provider:
+  # How often to refresh the historical funding rate data from the provider's REST API.
+  # Value is in minutes.
+  refresh_interval_minutes: 15
+
+# --------------------------------------------------------------------------------
+# TRANSPORT
+#
+# Configuration for sending notifications.
+# --------------------------------------------------------------------------------
+transport:
+  telegram:
+    enabled: true
+    # For security, token and chat_id should be set via environment variables:
+    # TELEGRAM_BOT_TOKEN
+    # TELEGRAM_CHAT_ID
+    # However, you can override them here for testing (NOT RECOMMENDED).
+    bot_token: null
+    chat_id: null
+
+  # Global dry_run flag. If true, no external messages (e.g., Telegram)
+  # will be sent. All actions will only be logged.
+  dry_run: true
+
+# --------------------------------------------------------------------------------
+# BACKTEST SETTINGS
+# --------------------------------------------------------------------------------
+backtest:
+  start_date: "2023-01-01"
+  end_date: "2023-12-31"
+  data:
+    provider: "csv"
+    base_path: "data"
+    cache_path: ".cache/data"
+  execution:
+    initial_capital: 10000.0
+    default_size_pct: 1.0
+    fee_bps: 4.0
+    slippage_model: "atr"
+
+# --------------------------------------------------------------------------------
+# REPORTING SETTINGS
+# --------------------------------------------------------------------------------
+reports:
+  output_dir: "reports"
+
+# --------------------------------------------------------------------------------
+# LOGGING SETTINGS
+# --------------------------------------------------------------------------------
+logging:
+  level: "DEBUG"

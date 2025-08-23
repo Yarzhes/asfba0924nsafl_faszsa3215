@@ -1,0 +1,152 @@
+backtest:
+  start_date: '2023-01-01'
+  end_date:   '2023-03-31'
+  data:
+    provider: csv
+    base_path: data
+    timestamp_col: "timestamp"
+    epoch: null
+  execution:
+    default_size_pct: 1.0
+    fee_bps: 4.0
+    initial_capital: 10000.0
+    slippage_model: atr
+brakes:
+  daily_loss_hard_limit_pct: 4.0
+  daily_loss_soft_limit_pct: 2.0
+  min_spacing_sec_cluster: 300
+  streak_cooldown_hours: 12
+  streak_cooldown_trades: 3
+correlation:
+  cluster_threshold: 0.7
+  enabled: true
+  hysteresis: 0.1
+  lookback_periods: 200
+  refresh_interval_bars: 50
+data_sources:
+  binance_usdm:
+    api_key: YOUR_BINANCE_API_KEY
+    api_secret: YOUR_BINANCE_API_SECRET
+derivatives:
+  funding_refresh_sec: 900
+  funding_trail_len: 8
+  liq_pulse:
+    notional_weight: 1.0
+    window_sec: 300
+  oi:
+    enabled: true
+    provider: mock
+    refresh_sec: 60
+engine:
+  risk:
+    max_spread_pct:
+      1000SHIBUSDT: 0.1
+      default: 0.06
+  scoring_weights:
+    momentum: 0.5
+    trend: 0.5
+    volatility: 0.0
+  thresholds:
+    enter: 0.6
+    exit: 0.4
+ensemble:
+  majority_threshold: 0.6
+  veto_band_pierce: true
+  veto_trend_flip: true
+features:
+  momentum:
+    macd_fast: 12
+    macd_signal: 9
+    macd_slow: 26
+    rsi_period: 14
+  trend:
+    ema_long: 200
+    ema_medium: 50
+    ema_short: 20
+  volatility:
+    atr_period: 14
+    bbands_period: 20
+    bbands_stddev: 2
+  volume_flow:
+    volume_z_window: 50
+    vwap_std_devs:
+    - 1.0
+    - 2.0
+    vwap_window: 20
+  warmup_periods: 200
+filters:
+  avoid_funding_minutes: 5
+funding_rate_provider:
+  refresh_interval_minutes: 15
+portfolio:
+  max_exposure_per_cluster: 3000.0
+  max_exposure_per_symbol: 1000.0
+  max_margin_pct: 50.0
+  max_net_exposure: 5000.0
+  max_total_positions: 10
+regime:
+  adx_min_trend: 15
+  atr_percentile_windows: 200
+  hysteresis_bars: 3
+  variance_ratio_window: 20
+reports:
+  output_dir: reports
+runtime:
+  primary_timeframe: 5m
+  reconnect_backoff_ms: 2000
+  symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+  timeframes:
+  - 1m
+  - 5m
+sizing:
+  vol_risk_scale_pct: 0.5
+transport:
+  dry_run: true
+  telegram:
+    bot_token: null
+    chat_id: null
+    enabled: true
+walkforward:
+  # Match CSV coverage (Jan → Mar 2023)
+  analysis_start_date: '2023-01-01'
+  analysis_end_date:   '2023-03-31'
+
+  # ✅ REQUIRED → These are what the app actually reads
+  train_days: 21
+  test_days: 7
+  purge_days: 1
+
+  # Optional — for readability only; app ignores these in your version,
+  # but we keep them for compatibility with future releases
+  data_rules:
+    embargo_period: 5d
+    purge_period: 1d
+  window:
+    train_period: 21d
+    test_period: 7d
+    advance_by: 10d
+weights_profiles:
+  chop:
+    derivatives: 0.1
+    flow: 0.25
+    momentum: 0.2
+    orderbook: 0.15
+    trend: 0.1
+    volatility: 0.2
+  mean_revert:
+    derivatives: 0.15
+    flow: 0.22
+    momentum: 0.22
+    orderbook: 0.13
+    trend: 0.15
+    volatility: 0.13
+  trend:
+    derivatives: 0.14
+    flow: 0.18
+    momentum: 0.22
+    orderbook: 0.08
+    trend: 0.3
+    volatility: 0.08

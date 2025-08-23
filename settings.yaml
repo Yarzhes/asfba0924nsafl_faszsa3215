@@ -1,0 +1,171 @@
+# Ultra-Signals Settings - v0.1
+
+# --------------------------------------------------------------------------------
+# DATA SOURCES
+# --------------------------------------------------------------------------------
+data_sources:
+  binance_usdm:
+    api_key: "qWV8egLZudf3GNzt2LygfMfgqr6Hw2gWbXE9RjwP6VVhF9Sif9qVY1vot9cr1RsV"
+    api_secret: "2LjccLY6enls0g5hE1MqeC9jMmrSArhezIfm6X4ZcyUhS2xUSisxELZreSwebPjm"
+
+# --------------------------------------------------------------------------------
+# RUNTIME SETTINGS
+# --------------------------------------------------------------------------------
+runtime:
+  symbols: ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+  timeframes: ["1m", "5m"]
+  primary_timeframe: "5m"
+  reconnect_backoff_ms: 2000
+
+# --------------------------------------------------------------------------------
+# FEATURE COMPUTATION
+# --------------------------------------------------------------------------------
+features:
+  warmup_periods: 200
+  trend:
+    ema_short: 20
+    ema_medium: 50
+    ema_long: 200
+  momentum:
+    rsi_period: 14
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+  volatility:
+    atr_period: 14
+    bbands_period: 20
+    bbands_stddev: 2.0
+  volume_flow:
+    vwap_window: 20
+    vwap_std_devs: [1.0, 2.0]
+    volume_z_window: 50
+
+# --------------------------------------------------------------------------------
+# DERIVATIVES, REGIME & SCORING
+# --------------------------------------------------------------------------------
+derivatives:
+  funding_trail_len: 8
+  funding_refresh_sec: 900
+  oi:
+    enabled: true
+    provider: "mock"
+    refresh_sec: 60
+  liq_pulse:
+    window_sec: 300
+    notional_weight: 1.0
+
+regime:
+  hysteresis_bars: 3
+  adx_min_trend: 15
+  atr_percentile_windows: 200
+  variance_ratio_window: 20
+
+weights_profiles:
+  trend:       {trend: 0.30, momentum: 0.22, volatility: 0.08, flow: 0.18, orderbook: 0.08, derivatives: 0.14}
+  mean_revert: {trend: 0.15, momentum: 0.22, volatility: 0.13, flow: 0.22, orderbook: 0.13, derivatives: 0.15}
+  chop:        {trend: 0.10, momentum: 0.20, volatility: 0.20, flow: 0.25, orderbook: 0.15, derivatives: 0.10}
+
+filters:
+  avoid_funding_minutes: 5
+
+# --------------------------------------------------------------------------------
+# ENGINE - SCORING, RISK & SIZING
+# --------------------------------------------------------------------------------
+engine:
+  scoring_weights:   # (deprecated by weights_profiles; kept for compatibility)
+    trend: 0.5
+    momentum: 0.5
+    volatility: 0.0
+  thresholds:
+    enter: 0.1
+    exit: 0.4
+  risk:
+    max_spread_pct:
+      default: 0.06
+      "1000SHIBUSDT": 0.1
+
+# --------------------------------------------------------------------------------
+# ENSEMBLE / CORRELATION
+# --------------------------------------------------------------------------------
+ensemble:
+  min_score: 0.05
+  majority_threshold: 0.50
+  veto_trend_flip: true
+  veto_band_pierce: true
+
+correlation:
+  enabled: true
+  lookback_periods: 200
+  cluster_threshold: 0.7
+  hysteresis: 0.1
+  refresh_interval_bars: 50
+
+# --------------------------------------------------------------------------------
+# PORTFOLIO / EXECUTION SETTINGS
+# --------------------------------------------------------------------------------
+portfolio:
+  # Exposure limits (from your validated config)
+  max_exposure_per_symbol: 1000.0
+  max_exposure_per_cluster: 3000.0
+  max_net_exposure: 5000.0
+  max_margin_pct: 50.0
+
+  # Position count limits
+  max_total_positions: 10              # NOTE: key name matches the app schema
+  max_positions_per_symbol: 3          # <-- ADD/ADJUST THIS to allow >1 per symbol
+
+# --------------------------------------------------------------------------------
+# BRAKES & SIZING
+# --------------------------------------------------------------------------------
+brakes:
+  min_spacing_sec_cluster: 300
+  daily_loss_soft_limit_pct: 2.0
+  daily_loss_hard_limit_pct: 4.0
+  streak_cooldown_trades: 3
+  streak_cooldown_hours: 12
+
+sizing:
+  vol_risk_scale_pct: 0.5
+
+# --------------------------------------------------------------------------------
+# FUNDING RATE PROVIDER
+# --------------------------------------------------------------------------------
+funding_rate_provider:
+  refresh_interval_minutes: 15
+
+# --------------------------------------------------------------------------------
+# TRANSPORT
+# --------------------------------------------------------------------------------
+transport:
+  telegram:
+    enabled: true
+    bot_token: null
+    chat_id: null
+  dry_run: true
+
+# --------------------------------------------------------------------------------
+# BACKTEST SETTINGS
+# --------------------------------------------------------------------------------
+backtest:
+  start_date: "2023-01-01"
+  end_date: "2023-12-31"
+  data:
+    provider: "csv"
+    base_path: "data"
+    cache_path: ".cache/data"
+  execution:
+    initial_capital: 10000.0
+    default_size_pct: 1.0
+    fee_bps: 4.0
+    slippage_model: "atr"
+    tp_pct: 0.05 # 5% take profit
+    sl_pct: 0.05 # 5% stop loss
+
+# --------------------------------------------------------------------------------
+# REPORTING & LOGGING
+# --------------------------------------------------------------------------------
+reports:
+  output_dir: "reports"
+
+logging:
+  level: "DEBUG"

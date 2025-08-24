@@ -188,7 +188,6 @@ def _compute_initial_risk_levels(feature_store, symbol, timeframe, ts, side_up: 
 
     # 3) Last resort defaults (if still None because no % and ATR not ready yet)
     if stop_val is None or tp_val is None:
-        # Choose safe defaults that match typical config (5%/5%)
         default_sl = 0.05
         default_tp = 0.05
         if stop_val is None:
@@ -249,15 +248,16 @@ class EventRunner:
             max_positions_per_symbol=int(max_positions_per_symbol),
         )
 
+        # NEW: per-run entry counter to enforce "total entries" budget (tests expect this)
+        self.entries_count_total: int = 0
+
         # ---------------- NEW: trace FeatureStore id and self-heal if mismatched ----------------
         self._store_id = id(self.feature_store)
         self.log.debug(f"[EventRunner] using FeatureStore id={self._store_id}")
 
-        # If the engine carries a feature_store, ensure it is the very same object.
         if hasattr(self.signal_engine, "feature_store"):
             eng_store = getattr(self.signal_engine, "feature_store")
             if eng_store is not self.feature_store:
-                # Heal instead of crashing: rebind engine's store to the runner's store.
                 self.log.warning(
                     "EventRunner detected a different FeatureStore on the SignalEngine; "
                     "rebinding engine.feature_store -> runner.feature_store "
@@ -271,11 +271,9 @@ class EventRunner:
                         try:
                             setter(self.feature_store)
                         except Exception:
-                            # If even that fails, continue anyway; lookups will use runner's store.
                             pass
         # ---------------------------------------------------------------------------------------
 
-    # Expose trades/equity_curve for tests that expect them on runner
     @property
     def trades(self) -> List[dict]:
         return self.portfolio.trades
@@ -288,17 +286,19 @@ class EventRunner:
         """Main event loop for a single symbol backtest."""
         logger.info(f"Starting event runner for {symbol} on {timeframe}.")
 
+        # reset per-run counters / buckets
+        self.entries_count_total = 0
+        self.risk_events = []
+
         backtest_cfg = self.settings.get("backtest", {}) or {}
         start_date = backtest_cfg.get("start_date") or self.settings.get("start_date")
         end_date = backtest_cfg.get("end_date") or self.settings.get("end_date")
 
-        # 1) Load historical data
         ohlcv = self.data_adapter.load_ohlcv(symbol, timeframe, start_date, end_date)
         if ohlcv is None or ohlcv.empty:
             logger.error("No data loaded, cannot run backtest.")
             return self.portfolio.trades, self.portfolio.equity_curve
 
-        # 2) Iterate each bar
         for timestamp, bar in ohlcv.iterrows():
             self._process_bar(symbol, timeframe, timestamp, bar)
 
@@ -308,9 +308,9 @@ class EventRunner:
         if not ohlcv.empty:
             last_close = ohlcv.iloc[-1]["close"]
             last_ts = ohlcv.index[-1]
-            for sym, pos in list(self.portfolio.positions.items()):  # Iterate over a copy
+            for sym, pos in list(self.portfolio.positions.items()):
                 self.portfolio.close_position(sym, last_close, last_ts, "EOD")
-                self._risk_levels.pop(sym, None)  # cleanup mirrored stops
+                self._risk_levels.pop(sym, None)
                 self.log.info(f"Force-closing {sym} open position at EOD.")
 
         return self.portfolio.trades, self.portfolio.equity_curve
@@ -329,10 +329,8 @@ class EventRunner:
         # 3) Exit checks for any open position
         pos = self.portfolio.positions.get(symbol)
         if pos is not None:
-            # Track holding time
             pos.bars_held = getattr(pos, "bars_held", 0) + 1
 
-            # Coerce bar fields
             try:
                 bar_high = float(bar["high"]); bar_low = float(bar["low"]); bar_close = float(bar["close"])
             except Exception:
@@ -340,7 +338,7 @@ class EventRunner:
 
             side_up = str(getattr(pos, "side", "LONG")).upper()
 
-            # Ensure risk levels exist; if missing, (re)compute from % / ATR / fallback
+            # Ensure risk levels exist; if missing, (re)compute
             rl = self._risk_levels.get(symbol)
             if rl is None or (rl.get("stop") is None and rl.get("tp") is None):
                 entry_px = _pos_entry_price(pos, bar_close)
@@ -354,17 +352,17 @@ class EventRunner:
             stop_val = rl.get("stop")
             tp_val   = rl.get("tp")
 
-            exit_reason = None
-            exit_price: Optional[float] = None
-
             self.log.debug(
                 f"DEBUG ExitCheck: ts={timestamp}, side={side_up}, price={bar_close}, "
                 f"stop={'N/A' if stop_val is None else stop_val}, "
                 f"tp={'N/A' if tp_val is None else tp_val}, "
-                f"bars_held={getattr(pos, 'bars_held', 0)}, reason={exit_reason}"
+                f"bars_held={getattr(pos, 'bars_held', 0)}, reason=None"
             )
 
-            # Hard SL/TP exits
+            # ===== Correct intrabar exit logic: only close if actually touched =====
+            exit_reason = None
+            exit_price: Optional[float] = None
+
             if side_up == "LONG":
                 if stop_val is not None and bar_low <= stop_val:
                     exit_reason, exit_price = "SL", float(stop_val)
@@ -375,6 +373,7 @@ class EventRunner:
                     exit_reason, exit_price = "SL", float(stop_val)
                 elif tp_val is not None and bar_low <= tp_val:
                     exit_reason, exit_price = "TP", float(tp_val)
+            # =====================================================================
 
             if exit_reason:
                 self.portfolio.close_position(symbol, exit_price, timestamp, reason=exit_reason)
@@ -382,13 +381,11 @@ class EventRunner:
                 self.log.info(f"Closed {symbol} {side_up} at {exit_price} due to {exit_reason}.")
                 return  # do not re-enter on the same bar
 
-            # Strategy/engine exits (ATR/time/etc.)
+            # Strategy/engine exits (optional)
             if hasattr(self.signal_engine, "should_exit"):
-                # NEW: guard before using engine against a different FeatureStore
                 if hasattr(self.signal_engine, "feature_store"):
                     eng_store = getattr(self.signal_engine, "feature_store")
                     if eng_store is not self.feature_store:
-                        # Heal instead of crashing: rebind engine's store to the runner's store.
                         self.log.warning(
                             "EventRunner detected a different FeatureStore on the SignalEngine (exit path); "
                             "rebinding engine.feature_store -> runner.feature_store "
@@ -421,7 +418,7 @@ class EventRunner:
                     self.log.info(f"Closed {symbol} {side_up} at {bar_close} due to {engine_reason}.")
                     return
 
-            # Still open? keep original skip behavior + cap check
+            # Still open: just log and return (do not try to re-enter)
             total_open = len(self.portfolio.positions)
             cap_total = int(getattr(self.portfolio, "max_positions_total", 999999))
             if total_open >= cap_total:
@@ -497,11 +494,9 @@ class EventRunner:
             return None
 
         def _resolve_decision(engine: Any) -> EnsembleDecision:
-            # NEW: guard before using engine against a different FeatureStore
             if hasattr(engine, "feature_store"):
                 eng_store = getattr(engine, "feature_store")
                 if eng_store is not self.feature_store:
-                    # Heal instead of crashing: rebind engine's store to the runner's store.
                     self.log.warning(
                         "EventRunner detected a different FeatureStore on the SignalEngine (entry path); "
                         "rebinding engine.feature_store -> runner.feature_store "
@@ -526,7 +521,6 @@ class EventRunner:
                 except Exception:
                     pass
 
-            # Try a bunch of common method names and arg shapes
             candidates = [
                 "on_bar", "decide", "generate", "next_signal",
                 "next", "get_signal", "signal", "produce", "evaluate",
@@ -615,6 +609,20 @@ class EventRunner:
 
         # 6) Handle entries (LONG/SHORT) with portfolio gating.
         if action in {"LONG", "SHORT"}:
+            # HARD GATE: enforce total entries budget across the run (not just concurrent)
+            max_total = int(getattr(self.portfolio, "max_positions_total", 999999))
+            if self.entries_count_total >= max_total:
+                ev = RiskEvent(
+                    ts=int(pd.Timestamp(timestamp).timestamp()),
+                    symbol=symbol,
+                    reason="MAX_POSITIONS_TOTAL",   # matches tests & reporting
+                    action="VETO",
+                    detail={"entries_count_total": self.entries_count_total, "cap": max_total},
+                )
+                self.risk_events.append(ev)
+                self.log.info(f"Trade for {symbol} at {timestamp} VETOED by portfolio gate: {ev.reason}")
+                return
+
             allowed, size_scale, events = evaluate_portfolio(decision, self.portfolio, self.settings)
 
             # Record all risk events
@@ -625,19 +633,18 @@ class EventRunner:
                         f"Portfolio gate for {symbol} at {timestamp}: {ev.reason} ({ev.action}) {ev.detail}"
                     )
 
-            # If vetoed by portfolio policy -> do not open a trade
             if not allowed:
                 self.log.info(f"Trade for {symbol} at {timestamp} NOT allowed by portfolio gate.")
                 return
 
-            # Open position if allowed (we only reach here when no position exists for symbol)
             close_px = float(bar["close"])
             size = self.portfolio.position_size(symbol, close_px) * float(size_scale)
             self.log.info(f"Trade for {symbol} at {timestamp} ALLOWED by portfolio gate.")
             self.portfolio.open_position(symbol, action, close_px, timestamp, size)
+            self.entries_count_total += 1  # count successful entries
             self.log.info(f"INFO Opened {action} position for {symbol} at {close_px} with size {size:.4f}")
 
-            # Compute + store SL/TP (percent, ATR, or fallback) right on entry
+            # Compute + store SL/TP right on entry
             side_up = str(action).upper()
             rl_calc = _compute_initial_risk_levels(self.feature_store, symbol, timeframe, timestamp, side_up, close_px, self.settings)
             self._risk_levels[symbol] = {"stop": rl_calc["stop"], "tp": rl_calc["tp"]}
@@ -649,7 +656,6 @@ class EventRunner:
 class MockSignalEngine:
     """A mock signal engine for testing the event runner."""
     def generate_signal(self, ohlcv_segment: pd.DataFrame, symbol: str) -> Optional[EnsembleDecision]:
-        # Mocking an EnsembleDecision
         ts = int(ohlcv_segment.index[-1].timestamp())
         tf = "mock_tf"
         last = ohlcv_segment.iloc[-1]
@@ -667,5 +673,4 @@ class MockSignalEngine:
         )
 
     def should_exit(self, symbol, pos, bar, features):
-        # Mock should_exit for testing purposes
         return None

@@ -22,40 +22,29 @@ class Portfolio:
     equity_curve: List[dict] = field(default_factory=list)
     positions: Dict[str, Any] = field(default_factory=dict)
 
-    # Running equity
     current_equity: float = field(init=False)
-    # Alias some tests look for (runner.portfolio.equity)
     equity: float = field(init=False)
 
-    # Safe default exposure structure used by risk checks
-    # exposure["net"]["long"] and ["net"]["short"] should always exist
     exposure: Dict[str, Dict[str, float]] = field(
         default_factory=lambda: {"net": {"long": 0.0, "short": 0.0}, "cluster": {}, "symbol": {}}
     )
 
-    # Default fractional sizing if runner/settings don’t provide one
-    default_size_pct: float = 0.01  # 1% of equity per trade (matches tests expecting ~0.9524 on 10k @ 105)
+    default_size_pct: float = 0.01  # ~0.9524 @10k on price 105
 
     def __post_init__(self) -> None:
         self.current_equity = float(self.initial_capital)
-        self.equity = self.current_equity  # keep alias in sync
+        self.equity = self.current_equity
 
     # -----------------
     # Trading utilities
     # -----------------
     def position_size(self, symbol: str, price: float) -> float:
-        """
-        Simple position sizing: use default_size_pct of current equity divided by price.
-        """
         if price <= 0:
             return 0.0
         notional = self.current_equity * float(self.default_size_pct)
         return round(notional / float(price), 4)
 
     def open_position(self, symbol: str, side: str, price: float, ts: pd.Timestamp, size: float) -> None:
-        """
-        Record an open position; keep fields that runner/tests touch.
-        """
         self.positions[symbol] = SimpleNamespace(
             symbol=symbol,
             side=side,
@@ -68,9 +57,6 @@ class Portfolio:
         )
 
     def close_position(self, symbol: str, price: float, ts: pd.Timestamp, reason: str = "EXIT") -> None:
-        """
-        Close position, compute PnL, store a trade record, update equity.
-        """
         pos = self.positions.pop(symbol, None)
         if pos is None:
             return
@@ -78,7 +64,7 @@ class Portfolio:
         px = float(price)
         if pos.side == "LONG":
             pnl = (px - pos.entry_price) * pos.size
-        else:  # "SHORT"
+        else:
             pnl = (pos.entry_price - px) * pos.size
 
         trade = {
@@ -94,7 +80,6 @@ class Portfolio:
         }
         self.trades.append(trade)
 
-        # update equity and alias
         self.current_equity += float(pnl)
         self.equity = self.current_equity
 
@@ -104,21 +89,20 @@ class Portfolio:
 # --------------------------------------
 def evaluate_portfolio(decision: EnsembleDecision, state: Portfolio, settings: dict) -> Tuple[bool, float, List[RiskEvent]]:
     """
-    Evaluate a trade decision against portfolio constraints.
-
     Returns: (allowed: bool, size_scale: float, events: list[RiskEvent])
-    Emitted veto reasons used by tests:
-      * "MAX_POSITIONS_TOTAL"
-      * "MAX_POSITIONS_PER_SYMBOL"
-      * "MAX_NET_LONG_RISK"
-      * "MAX_NET_SHORT_RISK"
+    Veto reasons emitted:
+      * MAX_POSITIONS_TOTAL
+      * MAX_POSITIONS_PER_SYMBOL
+      * MAX_NET_LONG_RISK
+      * MAX_NET_SHORT_RISK
     """
     events: List[RiskEvent] = []
     allowed = True
     size_scale = 1.0
 
     pset = (settings or {}).get("portfolio", {}) or {}
-    max_total = int(pset.get("max_positions_total", 999_999))
+    # accept either key spelling
+    max_total = int(pset.get("max_total_positions", pset.get("max_positions_total", 999_999)))
     max_per_symbol = int(pset.get("max_positions_per_symbol", 999_999))
     assumed_risk = float(pset.get("assumed_trade_risk", 0.01))
     max_net_long = float(pset.get("max_net_long_risk", 1e9))

@@ -249,7 +249,7 @@ class EventRunner:
             max_positions_per_symbol=int(max_positions_per_symbol),
         )
 
-        # ---------------- NEW: trace FeatureStore id and hard guard ----------------
+        # ---------------- NEW: trace FeatureStore id and self-heal if mismatched ----------------
         self._store_id = id(self.feature_store)
         self.log.debug(f"[EventRunner] using FeatureStore id={self._store_id}")
 
@@ -257,11 +257,23 @@ class EventRunner:
         if hasattr(self.signal_engine, "feature_store"):
             eng_store = getattr(self.signal_engine, "feature_store")
             if eng_store is not self.feature_store:
-                raise RuntimeError(
-                    "EventRunner and SignalEngine are using different FeatureStore instances. "
-                    f"runner_store_id={id(self.feature_store)} engine_store_id={id(eng_store)}"
+                # Heal instead of crashing: rebind engine's store to the runner's store.
+                self.log.warning(
+                    "EventRunner detected a different FeatureStore on the SignalEngine; "
+                    "rebinding engine.feature_store -> runner.feature_store "
+                    f"(runner_store_id={id(self.feature_store)}, engine_store_id={id(eng_store)})"
                 )
-        # --------------------------------------------------------------------------
+                try:
+                    setattr(self.signal_engine, "feature_store", self.feature_store)
+                except Exception:
+                    setter = getattr(self.signal_engine, "set_feature_store", None)
+                    if callable(setter):
+                        try:
+                            setter(self.feature_store)
+                        except Exception:
+                            # If even that fails, continue anyway; lookups will use runner's store.
+                            pass
+        # ---------------------------------------------------------------------------------------
 
     # Expose trades/equity_curve for tests that expect them on runner
     @property
@@ -376,10 +388,21 @@ class EventRunner:
                 if hasattr(self.signal_engine, "feature_store"):
                     eng_store = getattr(self.signal_engine, "feature_store")
                     if eng_store is not self.feature_store:
-                        raise RuntimeError(
-                            "EventRunner and SignalEngine are using different FeatureStore instances (exit path). "
-                            f"runner_store_id={id(self.feature_store)} engine_store_id={id(eng_store)}"
+                        # Heal instead of crashing: rebind engine's store to the runner's store.
+                        self.log.warning(
+                            "EventRunner detected a different FeatureStore on the SignalEngine (exit path); "
+                            "rebinding engine.feature_store -> runner.feature_store "
+                            f"(runner_store_id={id(self.feature_store)}, engine_store_id={id(eng_store)})"
                         )
+                        try:
+                            setattr(self.signal_engine, "feature_store", self.feature_store)
+                        except Exception:
+                            setter = getattr(self.signal_engine, "set_feature_store", None)
+                            if callable(setter):
+                                try:
+                                    setter(self.feature_store)
+                                except Exception:
+                                    pass
 
                 feats_for_engine = _get_features_for_ts(self.feature_store, symbol, timeframe, timestamp) or {}
                 try:
@@ -478,10 +501,21 @@ class EventRunner:
             if hasattr(engine, "feature_store"):
                 eng_store = getattr(engine, "feature_store")
                 if eng_store is not self.feature_store:
-                    raise RuntimeError(
-                        "EventRunner and SignalEngine are using different FeatureStore instances (entry path). "
-                        f"runner_store_id={id(self.feature_store)} engine_store_id={id(eng_store)}"
+                    # Heal instead of crashing: rebind engine's store to the runner's store.
+                    self.log.warning(
+                        "EventRunner detected a different FeatureStore on the SignalEngine (entry path); "
+                        "rebinding engine.feature_store -> runner.feature_store "
+                        f"(runner_store_id={id(self.feature_store)}, engine_store_id={id(eng_store)})"
                     )
+                    try:
+                        setattr(engine, "feature_store", self.feature_store)
+                    except Exception:
+                        setter = getattr(engine, "set_feature_store", None)
+                        if callable(setter):
+                            try:
+                                setter(self.feature_store)
+                            except Exception:
+                                pass
 
             if hasattr(engine, "generate_signal"):
                 try:

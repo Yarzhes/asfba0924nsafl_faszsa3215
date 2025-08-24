@@ -114,6 +114,14 @@ async def main_loop():
             # Ingest all events, but only trigger feature computation on closed klines
             feature_store.ingest_event(event)
 
+            # EXTRA RUNTIME GUARD: ensure no one swapped the global store under us
+            singleton_id_now = getattr(FeatureStore, "_process_singleton_id", None)
+            if singleton_id_now != id(feature_store):
+                raise RuntimeError(
+                    "FeatureStore singleton id changed during runtime. "
+                    f"expected={id(feature_store)} got={singleton_id_now}"
+                )
+
             # --- 4. Trigger on Closed Kline for Primary Timeframe ---
             if not isinstance(event, KlineEvent) or not event.closed:
                 continue

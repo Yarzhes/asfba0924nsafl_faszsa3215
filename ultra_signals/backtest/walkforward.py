@@ -43,6 +43,11 @@ class WalkForwardAnalysis:
         self.wf_settings: Dict[str, Any] = settings.get("walkforward", {}) or {}
         self.data_adapter = data_adapter
         self.signal_engine_class = signal_engine_class
+        # --- step 1: store risk events without changing any APIs ---
+        self.risk_events = []
+        self.risk_events_by_fold: List[Dict[str, Any]] = []
+        self._last_fold_risk_events = []
+        # -----------------------------------------------------------
 
     def run(self, symbol: str, timeframe: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
@@ -53,6 +58,11 @@ class WalkForwardAnalysis:
         logger.info("Starting walk-forward analysis...")
         logger.info(f"WF analysis range: {self.backtest_settings['backtest']['start_date']} → {self.backtest_settings['backtest']['end_date']}")
 
+        # --- ADDED: reset per-run risk aggregation bucket so repeated runs are clean ---
+        self.risk_events = []
+        self.risk_events_by_fold = []
+        self._last_fold_risk_events = []
+        # --------------------------------------------------------------------------------
 
         start_date = pd.to_datetime(self.backtest_settings["backtest"]["start_date"])
         end_date = pd.to_datetime(self.backtest_settings["backtest"]["end_date"])
@@ -76,8 +86,15 @@ class WalkForwardAnalysis:
 
             # Run backtest on test window
             test_trades, _ = self._run_test_fold(
-                symbol, timeframe, test_start, test_end, signal_engine_instance
+                symbol, timeframe, test_start, test_end, signal_engine_instance, fold_index=i  # ADDED: pass fold index
             )
+
+            # --- step 1: collect fold's risk events (no API changes) ---
+            fold_events = list(getattr(self, "_last_fold_risk_events", []))
+            if fold_events:
+                self.risk_events_by_fold.append({"fold": i + 1, "events": fold_events})
+                self.risk_events.extend(fold_events)
+            # -----------------------------------------------------------
 
             if not test_trades.empty:
                 all_trades.append(test_trades)
@@ -167,11 +184,11 @@ class WalkForwardAnalysis:
             advance_by_days = _parse_days(advance_by_str, test_days_res)
             current_start += timedelta(days=advance_by_days)
 
-        logger.info(f"Final windows: {windows}")
+            logger.info(f"Final windows: {windows}")
         return windows
 
     def _run_test_fold(
-        self, symbol, timeframe, start, end, engine
+        self, symbol, timeframe, start, end, engine, *, fold_index: int = 0  # ADDED: fold_index (kw-only)
     ) -> Tuple[pd.DataFrame, pd.Series]:
         """Runs the event runner for a single test fold."""
         # Shallow copy is enough here; we only replace dates
@@ -187,21 +204,44 @@ class WalkForwardAnalysis:
             settings=fold_settings,
         )
 
-        # Build a fresh engine that is bound to THIS fold’s FeatureStore.
+        # Build a fresh engine that is bound to THIS fold’s FeatureStore when possible.
+        # We support three forms seamlessly:
+        #   1) class(settings, fs)
+        #   2) factory(fs)
+        #   3) factory()  (and we only set fs if engine has none)
         try:
-            engine = self.signal_engine_class(fs)          # prefer factory(fs)
+            engine = self.signal_engine_class(fold_settings, fs)  # try (settings, fs)
         except TypeError:
-            engine = self.signal_engine_class()            # fall back to zero-arg
-            if hasattr(engine, "set_feature_store"):
-                try:
-                    engine.set_feature_store(fs)
-                except Exception:
-                    pass
+            try:
+                engine = self.signal_engine_class(fs)              # try (fs)
+            except TypeError:
+                engine = self.signal_engine_class()                # fallback zero-arg
+                # only set fs if engine doesn't already carry one
+                if hasattr(engine, "feature_store"):
+                    if getattr(engine, "feature_store", None) is None:
+                        if hasattr(engine, "set_feature_store"):
+                            try:
+                                engine.set_feature_store(fs)
+                            except Exception:
+                                pass
+
+        # ---- FIX: ensure EventRunner uses the SAME FeatureStore object as the engine ----
+        runner_fs = getattr(engine, "feature_store", fs)
+        if runner_fs is not fs:
+            logger.debug(
+                "Using engine-bound FeatureStore for runner (ids: engine=%s, fold=%s)",
+                id(runner_fs), id(fs)
+            )
+        # ---------------------------------------------------------------------------------
 
         # IMPORTANT: pass the FULL fold settings, not only ["backtest"]
-        runner = EventRunner(fold_settings, self.data_adapter, engine, fs)
+        runner = EventRunner(fold_settings, self.data_adapter, engine, runner_fs)
 
         result = runner.run(symbol, timeframe)
+
+        # --- step 1: stash fold risk events for the caller to aggregate ---
+        self._last_fold_risk_events = list(getattr(runner, "risk_events", []))
+        # ------------------------------------------------------------------
 
         if result is None:
             return pd.DataFrame(), pd.Series(dtype=float)

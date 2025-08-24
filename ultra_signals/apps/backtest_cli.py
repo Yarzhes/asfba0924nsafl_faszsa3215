@@ -225,6 +225,49 @@ def handle_wf(args, settings):
         preds_path = out_dir / "walk_forward_predictions.csv"
         trades[pred_cols].to_csv(preds_path, index=False)
 
+    # ------------------- ADDED: risk events export if available -------------------
+    try:
+        # Expect WalkForwardAnalysis to have 'risk_events_by_fold' if instrumented.
+        buckets = getattr(wf, "risk_events_by_fold", [])
+        events_flat = []
+        for bucket in buckets or []:
+            fold = bucket.get("fold")
+            for ev in bucket.get("events", []) or []:
+                if isinstance(ev, dict):
+                    row = dict(ev)
+                elif hasattr(ev, "__dict__"):
+                    row = dict(ev.__dict__)
+                else:
+                    try:
+                        row = dict(vars(ev))
+                    except Exception:
+                        row = {}
+                # ensure fold label on each row
+                row["fold"] = row.get("fold", fold)
+                events_flat.append(row)
+
+        if events_flat:
+            risk_path = out_dir / "risk_events.csv"
+            write_risk_events_csv(risk_path, events_flat)
+            logger.success(f"Risk events written to {risk_path}")
+
+            # Optional summary of VETO reasons
+            summary_pairs = summarize_veto_reasons(events_flat, top_n=50)
+            if summary_pairs:
+                import csv as _csv  # local alias to avoid any confusion
+                sum_path = out_dir / "risk_events_summary.csv"
+                with sum_path.open("w", newline="", encoding="utf-8") as f:
+                    w = _csv.writer(f)
+                    w.writerow(["reason", "count"])
+                    for reason, count in summary_pairs:
+                        w.writerow([reason, count])
+                logger.success(f"Risk events summary written to {sum_path}")
+        else:
+            logger.info("No risk events collected (wf.risk_events_by_fold empty or missing).")
+    except Exception as e:
+        logger.warning(f"Skipping risk events export due to: {e}")
+    # ------------------------------------------------------------------------------
+
     logger.success(f"WF outputs written to {out_dir}")
 
 
@@ -363,6 +406,87 @@ def main(argv: List[str] = None) -> None:
         args.func(args, settings)
     else:
         parser.print_help()
+
+
+# ------------------------------
+# STEP 2 ADDITIONS (helpers only)
+# ------------------------------
+from pathlib import Path
+from collections import Counter
+import csv
+import json
+from typing import Iterable, Mapping, Union
+
+def write_risk_events_csv(out_path: Union[str, Path], rows: Iterable[Any]) -> None:
+    """
+    Write RiskEvents (or dict-like rows) to CSV with stable columns.
+    Expected keys: fold, ts, symbol, reason, action, detail.
+    Extra keys are ignored. Dataclass/objects are supported via __dict__.
+    """
+    path = Path(out_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = ["fold", "ts", "symbol", "reason", "action", "detail"]
+
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in rows or []:
+            if row is None:
+                continue
+            # accept dataclass/obj/dict
+            if isinstance(row, Mapping):
+                d = dict(row)
+            elif hasattr(row, "__dict__"):
+                d = dict(row.__dict__)
+            else:
+                try:
+                    d = dict(vars(row))
+                except Exception:
+                    continue
+
+            detail = d.get("detail")
+            if isinstance(detail, (dict, list)):
+                try:
+                    detail = json.dumps(detail, ensure_ascii=False)
+                except Exception:
+                    detail = str(detail)
+
+            writer.writerow({
+                "fold": d.get("fold"),
+                "ts": d.get("ts"),
+                "symbol": d.get("symbol"),
+                "reason": d.get("reason"),
+                "action": d.get("action"),
+                "detail": detail,
+            })
+
+def summarize_veto_reasons(rows: Iterable[Any], top_n: int = 10):
+    """
+    Return a list of (reason, count) for events with action == 'VETO' (case-insensitive).
+    """
+    counts = Counter()
+    for row in rows or []:
+        if row is None:
+            continue
+        if isinstance(row, Mapping):
+            d = row
+        elif hasattr(row, "__dict__"):
+            d = row.__dict__
+        else:
+            try:
+                d = vars(row)
+            except Exception:
+                continue
+
+        action = str(d.get("action", "")).upper()
+        if action == "VETO":
+            reason = d.get("reason")
+            if reason:
+                counts[str(reason)] += 1
+
+    return counts.most_common(top_n)
 
 
 if __name__ == "__main__":

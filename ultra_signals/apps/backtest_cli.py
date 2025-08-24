@@ -42,15 +42,17 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
         return
     # ---------------------------------------
 
-    adapter = DataAdapter(settings.backtest.data.model_dump())
+    # DataAdapter expects a dict-like config with .get
+    adapter = DataAdapter(settings.model_dump())
+
     raw_warmup = getattr(settings.features, "warmup_periods", 100)
     try:
         warmup = int(raw_warmup)
     except Exception:
         warmup = 100
-
     if warmup <= 1:
         warmup = 2
+
     feature_store = FeatureStore(warmup_periods=warmup, settings=settings.model_dump())
     signal_engine = RealSignalEngine(settings.model_dump(), feature_store)
     runner = EventRunner(settings.model_dump(), adapter, signal_engine, feature_store)
@@ -63,7 +65,6 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
     
     if trades:
         trades_df = pd.DataFrame(trades)
-        
         kpis = compute_kpis(trades_df)
         
         report_settings = settings.reports.model_dump()
@@ -71,7 +72,7 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
             report_settings["output_dir"] = args.output_dir
         
         reporter = ReportGenerator(report_settings)
-        reporter.generate_report(kpis, equity, trades_df) # Pass raw equity list
+        reporter.generate_report(kpis, equity, trades_df)  # Pass raw equity list
         logger.success(f"Backtest finished. Report generated in {report_settings['output_dir']}.")
     else:
         logger.warning("Backtest finished with no trades.")
@@ -79,33 +80,107 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
         exit(1)
 
 
-def handle_wf(args: argparse.Namespace, settings: Any) -> None:
-    """Entrypoint for the 'wf' (walk-forward) command."""
+def handle_wf(args, settings):
+    """Walk-forward analysis entrypoint."""
+    from ultra_signals.backtest.data_adapter import DataAdapter
+    from ultra_signals.core.feature_store import FeatureStore
+    from ultra_signals.engine.real_engine import RealSignalEngine
+    from ultra_signals.backtest.walkforward import WalkForwardAnalysis
+    from loguru import logger
+    import pandas as pd
+    from pathlib import Path
+
     logger.info("Command: Walk-Forward Analysis")
-    
-    adapter = DataAdapter(settings.backtest.data.model_dump())
-    wf_analyzer = WalkForwardAnalysis(settings.model_dump(), adapter, MockSignalEngine)
-    
-    symbol = settings.runtime.symbols[0]
-    timeframe = settings.runtime.primary_timeframe
 
-    kpis, trades = wf_analyzer.run(symbol, timeframe)
+    # pick a warmup size safely
+    warmup_guess = (
+        getattr(getattr(settings, "features", object()), "warmup_bars", None)
+        or getattr(getattr(settings, "runtime", object()), "warmup_bars", None)
+        or 1600
+    )
+    fs = FeatureStore(warmup_periods=int(warmup_guess), settings=settings)
 
-    if not kpis.empty:
-        report_settings = settings.reports.model_dump()
-        if args.output_dir:
-            report_settings["output_dir"] = args.output_dir
-            
-        reporter = ReportGenerator(report_settings)
-        # reporter.generate_report(...) # TODO: Wire up KPIs for WF
-        if not trades.empty:
-            trades['outcome'] = (trades['pnl'] > 0).astype(int)
-            trades[['raw_score', 'outcome']].to_csv("walk_forward_predictions.csv", index=False)
-        
-        logger.info(f"Walk-forward KPI summary:\n{kpis}")
-        logger.success(f"Walk-forward analysis finished. Report generated in {report_settings['output_dir']}.")
-    else:
+    # Build a zero-arg factory that returns a fresh RealSignalEngine instance.
+    # Try common constructor signatures so it works with your version.
+    def engine_factory():
+        try:
+            return RealSignalEngine(settings, feature_store=fs)     # preferred kw
+        except TypeError:
+            try:
+                return RealSignalEngine(settings, fs)               # positional fs
+            except TypeError:
+                eng = RealSignalEngine(settings)                    # no fs in ctor
+                if hasattr(eng, "set_feature_store"):
+                    try:
+                        eng.set_feature_store(fs)
+                    except Exception:
+                        pass
+                return eng
+
+    # Data adapter
+    adapter = DataAdapter(settings)
+
+    # WalkForwardAnalysis wants dict-like settings
+    wf_settings = (
+        settings.model_dump() if hasattr(settings, "model_dump")
+        else (settings.dict() if hasattr(settings, "dict") else settings)
+    )
+    wf = WalkForwardAnalysis(wf_settings, adapter, engine_factory)
+
+    # Pull symbols/timeframe from settings safely
+    try:
+        symbols = list(settings.runtime.symbols) if getattr(settings, "runtime", None) else []
+    except Exception:
+        symbols = []
+    if not symbols:
+        symbols = ["BTCUSDT"]  # safe default
+
+    timeframe = getattr(getattr(settings, "runtime", object()), "primary_timeframe", None) or "1h"
+
+    # --- NORMALIZE WF OUTPUTS (handles DataFrame, (trades, equity), or nested lists) ---
+    def extract_trades(x):
+        """Return a list of trade DataFrames from x."""
+        if x is None:
+            return []
+        if isinstance(x, list):
+            out = []
+            for item in x:
+                out.extend(extract_trades(item))
+            return out
+        if isinstance(x, tuple):
+            # Expect (trades_df, equity_df, *rest). Keep the first element if it's a DF.
+            return [x[0]] if len(x) > 0 else []
+        # Assume it's already a DataFrame
+        return [x]
+
+    # Run WF per symbol and collect normalized trades
+    all_trades = []
+    for sym in symbols:
+        result = wf.run(sym, timeframe)  # WF expects (symbol, timeframe)
+        for d in extract_trades(result):
+            if d is not None and hasattr(d, "empty") and not d.empty:
+                all_trades.append(d)
+
+    if not all_trades:
         logger.warning("Walk-forward analysis generated no results.")
+        return
+
+    trades = pd.concat(all_trades, ignore_index=True)
+    logger.info(f"Walk-forward analysis finished. Found {len(trades)} rows of trades.")
+
+    # Outputs
+    out_dir = Path(getattr(args, "output_dir", "reports/wf"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    trades_path = out_dir / "walk_forward_trades.csv"
+    trades.to_csv(trades_path, index=False)
+
+    pred_cols = [c for c in ["raw_score", "calibrated_score", "outcome"] if c in trades.columns]
+    if pred_cols:
+        preds_path = out_dir / "walk_forward_predictions.csv"
+        trades[pred_cols].to_csv(preds_path, index=False)
+
+    logger.success(f"WF outputs written to {out_dir}")
 
 
 def handle_cal(args: argparse.Namespace, settings: Any) -> None:
@@ -114,7 +189,7 @@ def handle_cal(args: argparse.Namespace, settings: Any) -> None:
     
     # 1. Load prediction data (this would typically come from a WF run)
     # As a placeholder, we create dummy data.
-    predictions = pd.read_csv("walk_forward_predictions.csv") # Assumes this file exists
+    predictions = pd.read_csv("walk_forward_predictions.csv")  # Assumes this file exists
     
     # 2. Fit model
     model = calibrate.fit_calibration_model(
@@ -227,7 +302,6 @@ def main(argv: List[str] = None) -> None:
 
     settings = load_settings(args.config)
 
-    # Determine the log level. Command-line arg takes precedence over config file.
     # Determine log level with correct precedence: CLI > config > default
     if args.log_level:
         log_level = args.log_level
@@ -239,10 +313,8 @@ def main(argv: List[str] = None) -> None:
     setup_logging(log_level)
 
     if hasattr(args, "func"):
-        # Pass the loaded settings to the handler
         args.func(args, settings)
     else:
-        # This part should be unreachable due to `required=True` in subparsers
         parser.print_help()
 
 if __name__ == "__main__":

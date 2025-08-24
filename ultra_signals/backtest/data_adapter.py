@@ -3,13 +3,35 @@ from pathlib import Path
 from typing import Optional, Dict
 from loguru import logger
 
-class DataAdapter:
-    """Handles loading market data for backtesting from various sources."""
+# ultra_signals/backtest/data_adapter.py
 
-    def __init__(self, config: Dict):
-        self.config = config.get("data", {})
-        self.cache_path = Path(self.config.get("cache_path", ".cache/data"))
-        self.cache_path.mkdir(parents=True, exist_ok=True)
+class DataAdapter:
+    def __init__(self, config):
+        """
+        Accepts either a plain dict or a Pydantic BaseModel (v1 or v2).
+        Normalizes to a dict so downstream code can use .get(...)
+        """
+        # Pydantic v2
+        if hasattr(config, "model_dump"):
+            cfg = config.model_dump()
+        # Pydantic v1
+        elif hasattr(config, "dict"):
+            cfg = config.dict()
+        # already a dict
+        elif isinstance(config, dict):
+            cfg = config
+        else:
+            # last-resort best effort (keeps old behavior from breaking)
+            try:
+                cfg = dict(config)
+            except Exception:
+                cfg = {}
+
+        self.config = cfg.get("data", {}) or {}
+        # (optional) keep a reference to other top-level sections if you use them
+        self.features_cfg = cfg.get("features", {}) or {}
+        self.runtime_cfg = cfg.get("runtime", {}) or {}
+
 
     def load_ohlcv(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
         """

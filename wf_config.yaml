@@ -96,8 +96,6 @@ runtime:
   reconnect_backoff_ms: 2000
   symbols:
   - BTCUSDT
-  - ETHUSDT
-  - SOLUSDT
   timeframes:
   - 1m
   - 5m

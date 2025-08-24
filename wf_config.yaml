@@ -11,6 +11,8 @@ backtest:
     fee_bps: 4.0
     initial_capital: 10000.0
     slippage_model: atr
+    sl_pct: 0.01
+    tp_pct: 0.02
 brakes:
   daily_loss_hard_limit_pct: 4.0
   daily_loss_soft_limit_pct: 2.0

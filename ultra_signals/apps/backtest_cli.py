@@ -27,6 +27,7 @@ from ultra_signals.backtest.metrics import compute_kpis, calculate_brier_score
 import pandas as pd
 import matplotlib.pyplot as plt
 
+
 def handle_run(args: argparse.Namespace, settings: Any) -> None:
     """Entrypoint for the 'run' command."""
     logger.info("Command: Run Backtest")
@@ -53,24 +54,37 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
     if warmup <= 1:
         warmup = 2
 
+    # --- SINGLE FEATURESTORE FIX: create exactly one instance and share it everywhere ---
     feature_store = FeatureStore(warmup_periods=warmup, settings=settings.model_dump())
     signal_engine = RealSignalEngine(settings.model_dump(), feature_store)
     runner = EventRunner(settings.model_dump(), adapter, signal_engine, feature_store)
-    
+
+    # Guard + helpful debug so the "two stores" bug can't happen silently.
+    logger.debug(f"[backtest_cli] FeatureStore(shared) id={id(feature_store)}")
+    logger.debug(f"[backtest_cli] Engine.FeatureStore id={id(signal_engine.feature_store)}")
+    logger.debug(f"[backtest_cli] Runner.FeatureStore id={id(runner.feature_store)}")
+    assert signal_engine.feature_store is runner.feature_store is feature_store, (
+        "Two different FeatureStore instances detected! "
+        f"engine_store_id={id(signal_engine.feature_store)} "
+        f"runner_store_id={id(runner.feature_store)} "
+        f"shared_store_id={id(feature_store)}"
+    )
+    # -------------------------------------------------------------------------------
+
     # For now, we run on the first symbol specified in runtime config
     symbol = settings.runtime.symbols[0]
     timeframe = settings.runtime.primary_timeframe
 
     trades, equity = runner.run(symbol, timeframe)
-    
+
     if trades:
         trades_df = pd.DataFrame(trades)
         kpis = compute_kpis(trades_df)
-        
+
         report_settings = settings.reports.model_dump()
         if getattr(args, "output_dir", None):
             report_settings["output_dir"] = args.output_dir
-        
+
         reporter = ReportGenerator(report_settings)
         reporter.generate_report(kpis, equity, trades_df)  # Pass raw equity list
         logger.success(f"Backtest finished. Report generated in {report_settings['output_dir']}.")
@@ -78,6 +92,7 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
         logger.warning("Backtest finished with no trades.")
         # Return non-zero exit code if no trades
         exit(1)
+
 
 def _extract_trades(result):
     """Accepts DataFrame OR (trades_df, ...) OR [df, df, ...] and returns a list of dfs."""
@@ -95,6 +110,7 @@ def _extract_trades(result):
                 dfs.append(item)
         return dfs
     return []
+
 
 def handle_wf(args, settings):
     """Walk-forward analysis entrypoint."""
@@ -127,10 +143,10 @@ def handle_wf(args, settings):
         warmup_guess = 100
     warmup_guess = max(warmup_guess, 2)
 
-    # Build FeatureStore and engine using dict settings (match handle_run behavior)
+    # Build one FeatureStore and reuse it for every engine produced by the factory.
     fs = FeatureStore(warmup_periods=warmup_guess, settings=settings_dict)
 
-    # Build a zero-arg factory that returns a fresh RealSignalEngine instance.
+    # Factory that returns engines which all share the SAME FeatureStore instance.
     def engine_factory():
         try:
             return RealSignalEngine(settings_dict, feature_store=fs)   # preferred kw
@@ -197,6 +213,7 @@ def handle_wf(args, settings):
     logger.info(f"Walk-forward analysis finished. Found {len(trades)} rows of trades.")
 
     # Outputs
+    from pathlib import Path
     out_dir = Path(getattr(args, "output_dir", "reports/wf"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -255,6 +272,7 @@ def handle_cal(args: argparse.Namespace, settings: Any) -> None:
         logger.success(f"Reliability plot saved to {plot_path}")
     except Exception as e:
         logger.warning(f"Skipping reliability plot due to: {e}")
+
 
 def create_parser() -> argparse.ArgumentParser:
     """Creates the CLI argument parser."""
@@ -323,6 +341,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     return parser
 
+
 def main(argv: List[str] = None) -> None:
     """Main CLI entrypoint."""
     parser = create_parser()
@@ -344,6 +363,7 @@ def main(argv: List[str] = None) -> None:
         args.func(args, settings)
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()

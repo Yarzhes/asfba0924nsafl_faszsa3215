@@ -17,7 +17,7 @@ Design Principles:
 """
 
 from collections import defaultdict
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
 
 import math
 import numpy as np
@@ -52,6 +52,15 @@ from ultra_signals.features.volatility import compute_volatility_features
 from ultra_signals.features.volume_flow import compute_volume_flow_features
 
 
+def _safe_settings(d: dict, path: Tuple[str, ...], default: Any) -> Any:
+    cur = d or {}
+    for k in path:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+
 class FeatureStore:
     """
     Manages rolling time-series data (OHLCV, order book, etc.) for multiple
@@ -77,10 +86,11 @@ class FeatureStore:
         self._funding_provider = funding_provider
         self._settings = settings or {}
         logger.info(
-            f"FeatureStore initialized. Storing up to {self._max_length} OHLCV bars."
+            f"FeatureStore initialized (id={id(self)}). Storing up to {self._max_length} OHLCV bars."
         )
 
         # Raw data stores
+        # _ohlcv_data[symbol][timeframe] -> DataFrame
         self._ohlcv_data: Dict[str, Dict[str, pd.DataFrame]] = defaultdict(dict)
         self._latest_book_ticker: Dict[str, BookTickerEvent] = {}
         self._latest_mark_price: Dict[str, float] = {}
@@ -90,11 +100,14 @@ class FeatureStore:
 
         # Feature state and cache
         self._feature_states: Dict[str, Dict[str, object]] = defaultdict(dict)
-        # Cache layout: _feature_cache[symbol][pd.Timestamp] -> dict of feature groups
-        self._feature_cache: Dict[str, Dict[pd.Timestamp, Dict[str, object]]] = defaultdict(dict)
+
+        # Cache layout (fixed): _feature_cache[symbol][timeframe][pd.Timestamp] -> dict of feature groups
+        self._feature_cache: Dict[str, Dict[str, Dict[pd.Timestamp, Dict[str, object]]]] = defaultdict(
+            lambda: defaultdict(dict)
+        )
 
     # -------------------------------------------------------------------------
-    # Helpers (FIX B): normalize timestamps and provide robust feature lookups
+    # Helpers: normalize timestamps and provide robust feature lookups
     # -------------------------------------------------------------------------
     @staticmethod
     def _to_timestamp(ts_like: Any) -> Optional[pd.Timestamp]:
@@ -105,7 +118,6 @@ class FeatureStore:
             return None
         try:
             if isinstance(ts_like, (int, np.integer)):
-                # Infer unit by digit length (<=10: s, <=13: ms, else ns)
                 v = int(ts_like)
                 digits = int(math.log10(abs(v))) + 1 if v != 0 else 1
                 if digits <= 10:
@@ -119,7 +131,7 @@ class FeatureStore:
         except Exception:
             return None
 
-        # make tz-naive
+        # force tz-naive
         try:
             if ts.tzinfo is not None:
                 ts = ts.tz_convert(None)
@@ -131,61 +143,148 @@ class FeatureStore:
             pass
         return ts
 
-    def get_features(self, symbol: str, timestamp: pd.Timestamp) -> Optional[Dict]:
+    # NOTE: Backward/forward-compatible API
+    # - get_features(symbol, ts_like)                        -> search across all tfs (nearest<=)
+    # - get_features(symbol, timeframe, ts_like)             -> search within timeframe (nearest<=)
+    def get_features(self, symbol: str, arg2: Any, arg3: Any = None, *, nearest: bool = True) -> Optional[Dict]:
         """
-        Retrieves the dictionary of all computed features for a specific timestamp.
-        If exact match is missing, falls back to nearest earlier timestamp.
+        Retrieves the dictionary of all computed features.
+
+        Compatible call styles:
+          1) get_features(symbol, ts_like)
+          2) get_features(symbol, timeframe, ts_like)
+
+        If exact match is missing, falls back to nearest earlier timestamp when `nearest=True`.
         """
-        cache = self._feature_cache.get(symbol, {})
-        if not cache:
+        # Parse args
+        if arg3 is None:
+            timeframe: Optional[str] = None
+            ts = self._to_timestamp(arg2)
+        else:
+            timeframe = str(arg2) if arg2 is not None else None
+            ts = self._to_timestamp(arg3)
+
+        if ts is None:
+            logger.debug("[FeatureStore id={}] get_features: invalid timestamp input", id(self))
             return None
 
-        # 1) Try exact lookup first
-        if timestamp in cache:
-            return cache[timestamp]
+        # Pick the cache to search
+        sym_cache = self._feature_cache.get(symbol, {})
+        if not sym_cache:
+            logger.debug("[FeatureStore id={}] get_features: symbol={} cache empty (no timeframes)", id(self), symbol)
+            return None
 
-        # 2) Convert keys to sorted list of timestamps
+        if timeframe:
+            series = sym_cache.get(timeframe, {})
+            if not series:
+                logger.debug("[FeatureStore id={}] get_features: symbol={} tf={} cache empty", id(self), symbol, timeframe)
+                return None
+            # Direct / nearest search within timeframe
+            return self._lookup_series(series, ts, symbol, timeframe, nearest)
+        else:
+            # Merge search across all timeframes for this symbol
+            best = None
+            best_key = None
+            best_tf = None
+            for tf, series in sym_cache.items():
+                hit = self._lookup_series(series, ts, symbol, tf, nearest, quiet=True)
+                if hit is None:
+                    continue
+                # Choose the hit whose timestamp is closest to requested (but <=)
+                # Since _lookup_series returns dict only, we need the matched key as well.
+                # Re-run to get the key cheaply:
+                key = self._match_key(series, ts)
+                if key is None:
+                    continue
+                if best_key is None or key > best_key:
+                    best = hit
+                    best_key = key
+                    best_tf = tf
+            if best is not None:
+                logger.debug("[FeatureStore id={}] get_features: symbol={} merged-hit tf={} ts={}", id(self), symbol, best_tf, best_key)
+                return best
+
+            logger.debug("[FeatureStore id={}] get_features: symbol={} no features across any timeframe", id(self), symbol)
+            return None
+
+    def _match_key(self, series: Dict[pd.Timestamp, Dict], ts: pd.Timestamp) -> Optional[pd.Timestamp]:
+        if not series:
+            return None
+        if ts in series:
+            return ts
+        # nearest <= ts
+        keys = series.keys()
+        # Protect against non-sorted keys
         try:
-            sorted_keys = sorted(cache.keys())
+            candidates = [k for k in keys if k <= ts]
+            return max(candidates) if candidates else None
         except Exception:
-            sorted_keys = list(cache.keys())
+            try:
+                candidates = [pd.Timestamp(k) for k in keys if pd.Timestamp(k) <= ts]
+                return max(candidates) if candidates else None
+            except Exception:
+                return None
 
-        # 3) Find nearest timestamp <= requested one
-        for ts in reversed(sorted_keys):
-            if pd.Timestamp(ts) <= pd.Timestamp(timestamp):
+    def _lookup_series(
+        self,
+        series: Dict[pd.Timestamp, Dict],
+        ts: pd.Timestamp,
+        symbol: str,
+        timeframe: str,
+        nearest: bool,
+        quiet: bool = False,
+    ) -> Optional[Dict]:
+        if not series:
+            if not quiet:
+                logger.debug("[FeatureStore id={}] get_features: symbol={} tf={} series empty", id(self), symbol, timeframe)
+            return None
+
+        key = self._match_key(series, ts) if nearest else (ts if ts in series else None)
+        if key is None:
+            if not quiet:
                 logger.debug(
-                    "[FeatureStore] Fallback feature hit for %s at %s (using nearest <= %s)",
-                    symbol, timestamp, ts
+                    "[FeatureStore id={}] get_features: symbol={} tf={} miss at {} (nearest={})",
+                    id(self), symbol, timeframe, ts, nearest
                 )
-                return cache[ts]
+            return None
+        return series.get(key)
 
-        # 4) No match found
-        logger.debug(
-            "[FeatureStore] No features found for %s at %s, cache has %d keys",
-            symbol, timestamp, len(cache)
-        )
-        return None
+    # Convenience helpers
+    def get_features_at_or_before(self, symbol: str, timestamp: Any, timeframe: Optional[str] = None) -> Optional[Dict]:
+        return self.get_features(symbol, timeframe, timestamp, nearest=True) if timeframe else self.get_features(symbol, timestamp, nearest=True)
 
+    def get_features_nearest(self, symbol: str, timestamp: Any, timeframe: Optional[str] = None) -> Optional[Dict]:
+        return self.get_features_at_or_before(symbol, timestamp, timeframe)
 
-    # Convenience helpers expected by the engine (FIX B)
-    def get_features_at_or_before(self, symbol: str, timestamp: Any) -> Optional[Dict]:
-        """Alias for get_features(nearest=True)."""
-        return self.get_features(symbol, timestamp, nearest=True)
-
-    def get_features_nearest(self, symbol: str, timestamp: Any) -> Optional[Dict]:
-        """Return nearest (at-or-before) features."""
-        return self.get_features(symbol, timestamp, nearest=True)
-
-    def get_latest_features(self, symbol: str) -> Optional[Dict]:
-        """Return the most recently cached feature dict for a symbol."""
+    def get_latest_features(self, symbol: str, timeframe: Optional[str] = None) -> Optional[Dict]:
+        """Return the most recently cached feature dict for a symbol (optionally within a timeframe)."""
         sym_cache = self._feature_cache.get(symbol, {})
         if not sym_cache:
             return None
-        try:
-            latest_key = max(sym_cache.keys())
-            return sym_cache.get(latest_key)
-        except Exception:
-            return None
+        if timeframe:
+            series = sym_cache.get(timeframe, {})
+            if not series:
+                return None
+            try:
+                latest_key = max(series.keys())
+                return series.get(latest_key)
+            except Exception:
+                return None
+        # else, pick latest across all tfs
+        best = None
+        best_key = None
+        for tf, series in sym_cache.items():
+            if not series:
+                continue
+            try:
+                k = max(series.keys())
+            except Exception:
+                continue
+            if best_key is None or k > best_key:
+                best_key = k
+                best = series.get(k)
+        return best
+
     # -------------------------------------------------------------------------
 
     def _get_state(self, symbol: str, state_key: str, state_class):
@@ -194,14 +293,13 @@ class FeatureStore:
             self._feature_states[symbol][state_key] = state_class()
         return self._feature_states[symbol][state_key]
 
-    def on_bar(self, symbol: str, timeframe: str, bar: any):
+    def on_bar(self, symbol: str, timeframe: str, bar: Any):
         """
         Ingest a single OHLCV bar (plus timestamp) for a symbol/timeframe.
         `bar` may be dict, Series, single-row DataFrame, or 1-D array/tuple/list.
         """
         # --- Normalize `bar` into a single-row DataFrame -------------------------
         if isinstance(bar, pd.DataFrame):
-            # Ensure exactly one row
             if len(bar) == 0:
                 return
             new_row = bar.reset_index(drop=True).iloc[:1].copy()
@@ -211,13 +309,14 @@ class FeatureStore:
             new_row = pd.DataFrame([bar])
         else:
             arr = np.asarray(bar)
-            # Collapse shapes like (1, 6) → (6,)
             if arr.ndim == 2 and arr.shape[0] == 1:
                 arr = arr[0]
             if arr.ndim != 1:
                 raise ValueError(f"on_bar expects a single row; got shape {arr.shape}")
-            # If columns aren’t labeled, assume standard OHLCV ordering
-            new_row = pd.DataFrame([arr], columns=["timestamp", "open", "high", "low", "close", "volume"][:arr.shape[0]])
+            new_row = pd.DataFrame(
+                [arr],
+                columns=["timestamp", "open", "high", "low", "close", "volume"][: arr.shape[0]],
+            )
 
         # Ensure all expected columns exist
         for col in ["timestamp", "open", "high", "low", "close", "volume"]:
@@ -226,33 +325,34 @@ class FeatureStore:
 
         # Order columns & set index
         new_row = new_row[["timestamp", "open", "high", "low", "close", "volume"]]
-        new_row["timestamp"] = pd.to_datetime(new_row["timestamp"], unit="ms", errors="coerce")
+        # Kline timestamps are usually ms; tolerate already-datetime values
+        if not np.issubdtype(new_row["timestamp"].dtype, np.datetime64):
+            new_row["timestamp"] = pd.to_datetime(new_row["timestamp"], unit="ms", errors="coerce")
+        else:
+            new_row["timestamp"] = pd.to_datetime(new_row["timestamp"])
         new_row = new_row.set_index("timestamp")
 
-        # --- existing logic to append to internal store follows ------------------
+        # --- Append/replace to internal store -----------------------------------
         df = self._ohlcv_data[symbol].get(timeframe)
-
-        if df is None:
+        if df is None or df.empty:
             df = new_row
         else:
-            if not df.empty and df.index[-1] == new_row.index[0]:
-                df.iloc[-1] = new_row.iloc[0]
+            if df.index[-1] == new_row.index[0]:
+                df.iloc[-1] = new_row.iloc[0]  # update last in-place
             else:
                 df = pd.concat([df, new_row])
-
             if len(df) > self._max_length:
                 df = df.iloc[-self._max_length :]
-        
+
         self._ohlcv_data[symbol][timeframe] = df
-        
+
         # After ingesting, compute features for the new bar's timestamp
         self._compute_all_features(symbol, timeframe, new_row)
 
-    # Optional: unified event ingestion (kept minimal; original code referenced it in __main__)
+    # Unified event ingestion
     def ingest_event(self, event: MarketEvent) -> None:
         """
         Ingests various market events and updates internal stores.
-        This keeps the original design intent while remaining minimal.
         """
         try:
             if isinstance(event, KlineEvent):
@@ -284,200 +384,147 @@ class FeatureStore:
     def _compute_all_features(self, symbol: str, timeframe: str, bar: pd.DataFrame):
         """Computes and caches all component features for a given timestamp."""
         ohlcv = self.get_ohlcv(symbol, timeframe)
-        if ohlcv is None or len(ohlcv) < self._settings["features"]["warmup_periods"]:
+        warmup_need = _safe_settings(self._settings, ("features", "warmup_periods"), 1)
+        if ohlcv is None or len(ohlcv) < warmup_need:
             return
 
         timestamp = bar.index[0]
 
-        feature_config = self._settings["features"]
+        feature_config = self._settings.get("features", {})
         feature_dict: Dict[str, object] = {}
 
         # Trend
-        trend_feats = compute_trend_features(ohlcv, **feature_config["trend"])
-        if trend_feats:
-            feature_dict["trend"] = TrendFeatures(**trend_feats)
+        try:
+            trend_feats = compute_trend_features(ohlcv, **(feature_config.get("trend") or {}))
+            if trend_feats:
+                feature_dict["trend"] = TrendFeatures(**trend_feats)
+        except Exception as e:
+            logger.exception("trend feature error: {}", e)
 
         # Momentum
-        momentum_feats = compute_momentum_features(ohlcv, **feature_config["momentum"])
-        if momentum_feats:
-            feature_dict["momentum"] = MomentumFeatures(**momentum_feats)
+        try:
+            momentum_feats = compute_momentum_features(ohlcv, **(feature_config.get("momentum") or {}))
+            if momentum_feats:
+                feature_dict["momentum"] = MomentumFeatures(**momentum_feats)
+        except Exception as e:
+            logger.exception("momentum feature error: {}", e)
 
         # Volatility
-        vol_feats = compute_volatility_features(ohlcv, **feature_config["volatility"])
-        if vol_feats:
-            feature_dict["volatility"] = VolatilityFeatures(**vol_feats)
-        
+        try:
+            vol_feats = compute_volatility_features(ohlcv, **(feature_config.get("volatility") or {}))
+            if vol_feats:
+                feature_dict["volatility"] = VolatilityFeatures(**vol_feats)
+        except Exception as e:
+            logger.exception("volatility feature error: {}", e)
+
         # Volume/Flow
-        flow_feats = compute_volume_flow_features(ohlcv, **feature_config["volume_flow"])
-        if flow_feats:
-            feature_dict["volume_flow"] = VolumeFlowFeatures(**flow_feats)
+        try:
+            flow_feats = compute_volume_flow_features(ohlcv, **(feature_config.get("volume_flow") or {}))
+            if flow_feats:
+                feature_dict["volume_flow"] = VolumeFlowFeatures(**flow_feats)
+        except Exception as e:
+            logger.exception("volume_flow feature error: {}", e)
 
-        self._feature_cache[symbol][timestamp] = feature_dict
-        logger.debug(f"Computed features for {symbol} at {timestamp}: {feature_dict}")
+        self._feature_cache[symbol][timeframe][timestamp] = feature_dict
+        logger.debug(
+            "Computed features (store id={}) for {} {} at {}: {}",
+            id(self), symbol, timeframe, timestamp, feature_dict
+        )
 
-    # NOTE: kept signature but enhanced implementation above (FIX B provides robustness & nearest)
-    # def get_features(self, symbol: str, timestamp: pd.Timestamp) -> Optional[Dict]:
-    #     return self._feature_cache.get(symbol, {}).get(timestamp)
+    # ------------------- Latest market snapshots -------------------
 
     def _ingest_book_ticker(self, ticker: BookTickerEvent) -> None:
-        """Updates the latest book ticker for a symbol."""
         self._latest_book_ticker[ticker.symbol] = ticker
 
     def _ingest_mark_price(self, mark_price: MarkPriceEvent) -> None:
-        """Updates the latest mark price for a symbol."""
         self._latest_mark_price[mark_price.symbol] = mark_price.mark_price
 
     def _ingest_force_order(self, event: ForceOrderEvent) -> None:
-        """Adds a liquidation event to the recent liquidations list."""
         notional = event.price * event.quantity
-        self._recent_liquidations[event.symbol].append(
-            (event.timestamp, event.side, notional)
-        )
+        self._recent_liquidations[event.symbol].append((event.timestamp, event.side, notional))
 
     def _ingest_depth(self, event: DepthEvent) -> None:
-        """Updates the latest order book depth for a symbol."""
         self._latest_depth[event.symbol] = event
 
     def _ingest_agg_trade(self, event: AggTradeEvent) -> None:
-        """Adds an aggregated trade to the recent trades list."""
-        self._recent_trades[event.symbol].append(
-            (event.timestamp, event.price, event.quantity, event.is_buyer_maker)
-        )
+        self._recent_trades[event.symbol].append((event.timestamp, event.price, event.quantity, event.is_buyer_maker))
 
-    def get_ohlcv(self, symbol: str, timeframe: str) -> pd.DataFrame | None:
-        """
-        Retrieves the entire OHLCV DataFrame for a specific symbol and timeframe.
+    # ------------------- Public getters -------------------
 
-        Args:
-            symbol: The trading symbol (e.g., "BTCUSDT").
-            timeframe: The kline timeframe (e.g., "5m").
-
-        Returns:
-            A Pandas DataFrame containing the OHLCV data, or None if no data
-            is available for the requested series.
-        """
+    def get_ohlcv(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
         return self._ohlcv_data.get(symbol, {}).get(timeframe)
 
-    def get_spread(self, symbol: str) -> tuple[float, float, float] | None:
-        """
-        Calculates the spread and returns bid, ask, and spread.
-
-        Returns:
-            A tuple of (best_bid, best_ask, spread), or None if data isn't available.
-        """
+    def get_spread(self, symbol: str) -> Optional[Tuple[float, float, float]]:
         if ticker := self._latest_book_ticker.get(symbol):
             if ticker.best_bid > 0 and ticker.best_ask > 0:
                 return ticker.best_bid, ticker.best_ask, ticker.best_ask - ticker.best_bid
         return None
 
-    def get_book_ticker(self, symbol: str) -> tuple[float, float, float, float] | None:
-        """
-        Retrieves the latest full book ticker data (bid, bid_qty, ask, ask_qty).
-
-        Returns:
-            A tuple of (best_bid, best_bid_qty, best_ask, best_ask_qty), or None if not available.
-        """
+    def get_book_ticker(self, symbol: str) -> Optional[Tuple[float, float, float, float]]:
         if ticker := self._latest_book_ticker.get(symbol):
             return (ticker.best_bid, ticker.best_bid_qty, ticker.best_ask, ticker.best_ask_qty)
         return None
 
-    def get_depth(self, symbol: str) -> DepthEvent | None:
-        """Retrieves the most recent order book depth for a symbol."""
+    def get_depth(self, symbol: str) -> Optional[DepthEvent]:
         return self._latest_depth.get(symbol)
 
     def get_recent_trades(self, symbol: str) -> list:
-        """Returns the list of recent trade events for a symbol."""
         return self._recent_trades.get(symbol, [])
 
-    def get_mark_price(self, symbol: str) -> float | None:
-        """Retrieves the most recent mark price for a symbol."""
+    def get_mark_price(self, symbol: str) -> Optional[float]:
         return self._latest_mark_price.get(symbol)
 
-    def get_latest_close(self, symbol: str, timeframe: str) -> float | None:
-        """
-        Retrieves the most recent close price for a symbol and timeframe.
-
-        Args:
-            symbol: The trading symbol.
-            timeframe: The kline timeframe.
-
-        Returns:
-            The latest close price as a float, or None if not available.
-        """
+    def get_latest_close(self, symbol: str, timeframe: str) -> Optional[float]:
         df = self.get_ohlcv(symbol, timeframe)
         if df is not None and not df.empty:
-            return df["close"].iloc[-1]
+            return float(df["close"].iloc[-1])
         return None
 
     def get_warmup_status(self, symbol: str, timeframe: str) -> int:
-        """
-        Checks how many data points are available for a given series.
-
-        Args:
-            symbol: The trading symbol.
-            timeframe: The kline timeframe.
-
-        Returns:
-            The number of available bars for the series.
-        """
         df = self.get_ohlcv(symbol, timeframe)
         return len(df) if df is not None else 0
 
     def get_recent_liquidations(self, symbol: str) -> list:
-        """Returns the list of recent liquidation events for a symbol."""
         return self._recent_liquidations.get(symbol, [])
 
     def prune_and_get_liquidations(self, symbol: str, cutoff_ts: int) -> list:
-        """Prunes old liquidations and returns the remaining recent ones."""
-        recent_events = [
-            event for event in self._recent_liquidations.get(symbol, [])
-            if event[0] >= cutoff_ts
-        ]
+        recent_events = [event for event in self._recent_liquidations.get(symbol, []) if event[0] >= cutoff_ts]
         self._recent_liquidations[symbol] = recent_events
         return recent_events
 
     def prune_and_get_trades(self, symbol: str, cutoff_ts: int) -> list:
-        """Prunes old trades and returns the remaining recent ones."""
-        recent_trades = [
-            trade for trade in self._recent_trades.get(symbol, [])
-            if trade[0] >= cutoff_ts
-        ]
+        recent_trades = [trade for trade in self._recent_trades.get(symbol, []) if trade[0] >= cutoff_ts]
         self._recent_trades[symbol] = recent_trades
         return recent_trades
 
     def get_funding_rate_history(self, symbol: str) -> Optional[List[Dict]]:
-        """
-        Retrieves the historical funding rate data from the funding provider.
-
-        Args:
-            symbol: The trading symbol.
-
-        Returns:
-            A list of historical funding rate data points, or None if not available.
-        """
         if self._funding_provider:
             return self._funding_provider.get_history(symbol)
         return None
 
-    def get_vwap_features(self, symbol: str) -> Optional[dict]:
-        """Retrieves cached VWAP features for a symbol."""
-        return self._feature_cache.get(symbol, {}).get('vwap')
+    # Legacy convenience wrappers to pull a sub-feature from the latest cached bar
+    def get_vwap_features(self, symbol: str, timeframe: Optional[str] = None) -> Optional[dict]:
+        feats = self.get_latest_features(symbol, timeframe)
+        if feats and "volume_flow" in feats:
+            vf = feats["volume_flow"]
+            return {"vwap": getattr(vf, "vwap", None), "volume_z_score": getattr(vf, "volume_z_score", None)}
+        return None
 
-    def get_orderbook_features_v2(self, symbol: str) -> Optional[OrderbookFeaturesV2]:
-        """Retrieves cached Orderbook v2 features for a symbol."""
-        return self._feature_cache.get(symbol, {}).get('orderbook_v2')
+    def get_orderbook_features_v2(self, symbol: str, timeframe: Optional[str] = None) -> Optional[OrderbookFeaturesV2]:
+        feats = self.get_latest_features(symbol, timeframe)
+        return feats.get("orderbook_v2") if feats else None
 
-    def get_cvd_features(self, symbol: str) -> Optional[CvdFeatures]:
-        """Retrieves cached CVD features for a symbol."""
-        return self._feature_cache.get(symbol, {}).get('cvd')
+    def get_cvd_features(self, symbol: str, timeframe: Optional[str] = None) -> Optional[CvdFeatures]:
+        feats = self.get_latest_features(symbol, timeframe)
+        return feats.get("cvd") if feats else None
 
 
 # --- Example Usage ---
 if __name__ == "__main__":
     # A simple demonstration of the FeatureStore's functionality.
-    # Note: The settings dictionary would typically be loaded from a config file.
     mock_settings = {
         'features': {
+            'warmup_periods': 50,
             'trend': {'ema_short': 12, 'ema_medium': 26, 'ema_long': 50, 'adx_period': 14},
             'momentum': {'rsi_period': 14, 'macd_fast': 12, 'macd_slow': 26, 'macd_signal': 9},
             'volatility': {'atr_period': 14, 'bbands_period': 20, 'bbands_std': 2.0},
@@ -487,33 +534,18 @@ if __name__ == "__main__":
     store = FeatureStore(warmup_periods=50, settings=mock_settings)
 
     # 1. Create some dummy events
-    kline1 = KlineEvent(event_type="kline", timestamp=1672531200000, symbol="BTCUSDT", timeframe="1m", open=20000, high=20010, low=19990, close=20005, volume=100, closed=False)
-    kline1_update = KlineEvent(event_type="kline", timestamp=1672531200000, symbol="BTCUSDT", timeframe="1m", open=20000, high=20015, low=19990, close=20012, volume=150, closed=True)
-    depth1 = DepthEvent(event_type="depthUpdate", timestamp=1672531200500, symbol="BTCUSDT", bids=[(20004.5, 10), (20004.0, 15)], asks=[(20005.0, 12), (20005.5, 18)])
-    trade1 = AggTradeEvent(event_type="aggTrade", timestamp=1672531200600, symbol="BTCUSDT", price=20005.0, quantity=0.5, is_buyer_maker=False)
+    kline1 = KlineEvent(event_type="kline", timestamp=1672531200000, symbol="BTCUSDT", timeframe="1m",
+                        open=20000, high=20010, low=19990, close=20005, volume=100, closed=False)
+    kline1_update = KlineEvent(event_type="kline", timestamp=1672531200000, symbol="BTCUSDT", timeframe="1m",
+                               open=20000, high=20015, low=19990, close=20012, volume=150, closed=True)
 
-    # 2. Ingest events, which now also triggers feature computation
+    # 2. Ingest events, which also triggers feature computation
     store.ingest_event(kline1)
     store.ingest_event(kline1_update)
-    store.ingest_event(depth1)
-    store.ingest_event(trade1)
-    
-    logger.info("Ingested events and computed features.")
 
-    # 3. Check robust feature accessors (FIX B)
     ts_exact = pd.to_datetime(1672531200000, unit="ms")
-    ts_s = int(ts_exact.value // 10**9)
-    logger.info("Exact: {}", store.get_features("BTCUSDT", ts_exact) is not None)
-    logger.info("Epoch seconds: {}", store.get_features("BTCUSDT", ts_s, nearest=True) is not None)
-
-    # 4. Other accessors
-    vwap_feats = store.get_vwap_features("BTCUSDT")
-    ob_feats = store.get_orderbook_features_v2("BTCUSDT")
-    cvd_feats = store.get_cvd_features("BTCUSDT")
-
-    if vwap_feats:
-        logger.info(f"VWAP Features for BTCUSDT: {vwap_feats}")
-    if ob_feats:
-        logger.info(f"Orderbook V2 Features for BTCUSDT: Imbalance = {ob_feats.imbalance_ratio:.4f}")
-    if cvd_feats:
-        logger.info(f"CVD Features for BTCUSDT: Slope = {cvd_feats.cvd_slope}")
+    # both calls work:
+    _a = store.get_features("BTCUSDT", "1m", ts_exact)
+    _b = store.get_features("BTCUSDT", ts_exact)
+    logger.info("Feature hit with timeframe: {}", _a is not None)
+    logger.info("Feature hit legacy form:   {}", _b is not None)

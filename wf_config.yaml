@@ -43,16 +43,16 @@ engine:
       1000SHIBUSDT: 0.1
       default: 0.06
   scoring_weights:
-    momentum: 0.5
-    trend: 0.5
-    volatility: 0.0
+    momentum: 0.45     # was 0.5
+    trend: 0.35        # was 0.5
+    volatility: 0.20   # was 0.0   ← give volatility some weight
   thresholds:
-    enter: 0.6
-    exit: 0.4
+    enter: 0.50        # was 0.6   ← slightly easier to enter
+    exit:  0.35        # was 0.4   ← slightly easier to exit
 ensemble:
-  majority_threshold: 0.6
-  veto_band_pierce: true
-  veto_trend_flip: true
+  majority_threshold: 0.55  # was 0.6
+  veto_band_pierce: false   # was true
+  veto_trend_flip:  false   # was true
 features:
   momentum:
     macd_fast: 12
@@ -85,7 +85,7 @@ portfolio:
   max_net_exposure: 5000.0
   max_total_positions: 10
 regime:
-  adx_min_trend: 15
+  adx_min_trend: 10         # was 15
   atr_percentile_windows: 200
   hysteresis_bars: 3
   variance_ratio_window: 20
@@ -110,7 +110,7 @@ transport:
 walkforward:
   # Match CSV coverage (Jan → Mar 2023)
   analysis_start_date: '2023-01-01'
-  analysis_end_date:   '2023-03-31'
+  analysis_end_date:   '2023-03-30'
 
   # ✅ REQUIRED → These are what the app actually reads
   train_days: 21

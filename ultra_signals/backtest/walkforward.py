@@ -71,7 +71,8 @@ class WalkForwardAnalysis:
             )
 
             # (placeholder for training/tuning on the train window)
-            signal_engine_instance = self.signal_engine_class()  # re-init for determinism
+            # Engine is created in _run_test_fold so it can be bound to that fold’s FeatureStore.
+            signal_engine_instance = None
 
             # Run backtest on test window
             test_trades, _ = self._run_test_fold(
@@ -93,7 +94,7 @@ class WalkForwardAnalysis:
         logger.info(
             f"Walk-forward analysis finished. Found {len(kpi_summary)} folds with trades."
         )
-        return kpi_summary, combined_trades
+        return combined_trades, kpi_summary
 
     def _generate_windows(
         self, analysis_start: pd.Timestamp, analysis_end: pd.Timestamp
@@ -185,8 +186,23 @@ class WalkForwardAnalysis:
             warmup_periods=fold_settings["features"]["warmup_periods"],
             settings=fold_settings,
         )
-        runner = EventRunner(fold_settings["backtest"], self.data_adapter, engine, fs)
+
+        # Build a fresh engine that is bound to THIS fold’s FeatureStore.
+        try:
+            engine = self.signal_engine_class(fs)          # prefer factory(fs)
+        except TypeError:
+            engine = self.signal_engine_class()            # fall back to zero-arg
+            if hasattr(engine, "set_feature_store"):
+                try:
+                    engine.set_feature_store(fs)
+                except Exception:
+                    pass
+
+        # IMPORTANT: pass the FULL fold settings, not only ["backtest"]
+        runner = EventRunner(fold_settings, self.data_adapter, engine, fs)
+
         result = runner.run(symbol, timeframe)
+
         if result is None:
             return pd.DataFrame(), pd.Series(dtype=float)
 

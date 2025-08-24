@@ -79,6 +79,22 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
         # Return non-zero exit code if no trades
         exit(1)
 
+def _extract_trades(result):
+    """Accepts DataFrame OR (trades_df, ...) OR [df, df, ...] and returns a list of dfs."""
+    import pandas as pd
+    if result is None:
+        return []
+    if isinstance(result, pd.DataFrame):
+        return [result]
+    if isinstance(result, (list, tuple)):
+        dfs = []
+        for item in result:
+            if item is None:
+                continue
+            if hasattr(item, "empty"):  # looks like a DataFrame
+                dfs.append(item)
+        return dfs
+    return []
 
 def handle_wf(args, settings):
     """Walk-forward analysis entrypoint."""
@@ -92,24 +108,37 @@ def handle_wf(args, settings):
 
     logger.info("Command: Walk-Forward Analysis")
 
-    # pick a warmup size safely
+    # --------- OPTION B FIX: normalize settings to a plain dict everywhere ---------
+    if hasattr(settings, "model_dump"):
+        settings_dict = settings.model_dump()
+    elif hasattr(settings, "dict"):
+        settings_dict = settings.dict()
+    else:
+        settings_dict = settings  # already a dict
+    # ------------------------------------------------------------------------------
+
+    # pick a warmup size safely (use the same key the backtest uses)
     warmup_guess = (
-        getattr(getattr(settings, "features", object()), "warmup_bars", None)
-        or getattr(getattr(settings, "runtime", object()), "warmup_bars", None)
-        or 1600
+        settings_dict.get("features", {}).get("warmup_periods", 100)
     )
-    fs = FeatureStore(warmup_periods=int(warmup_guess), settings=settings)
+    try:
+        warmup_guess = int(warmup_guess)
+    except Exception:
+        warmup_guess = 100
+    warmup_guess = max(warmup_guess, 2)
+
+    # Build FeatureStore and engine using dict settings (match handle_run behavior)
+    fs = FeatureStore(warmup_periods=warmup_guess, settings=settings_dict)
 
     # Build a zero-arg factory that returns a fresh RealSignalEngine instance.
-    # Try common constructor signatures so it works with your version.
     def engine_factory():
         try:
-            return RealSignalEngine(settings, feature_store=fs)     # preferred kw
+            return RealSignalEngine(settings_dict, feature_store=fs)   # preferred kw
         except TypeError:
             try:
-                return RealSignalEngine(settings, fs)               # positional fs
+                return RealSignalEngine(settings_dict, fs)             # positional fs
             except TypeError:
-                eng = RealSignalEngine(settings)                    # no fs in ctor
+                eng = RealSignalEngine(settings_dict)                  # no fs in ctor
                 if hasattr(eng, "set_feature_store"):
                     try:
                         eng.set_feature_store(fs)
@@ -117,25 +146,23 @@ def handle_wf(args, settings):
                         pass
                 return eng
 
-    # Data adapter
-    adapter = DataAdapter(settings)
+    # Data adapter (dict config)
+    adapter = DataAdapter(settings_dict)
 
-    # WalkForwardAnalysis wants dict-like settings
-    wf_settings = (
-        settings.model_dump() if hasattr(settings, "model_dump")
-        else (settings.dict() if hasattr(settings, "dict") else settings)
-    )
-    wf = WalkForwardAnalysis(wf_settings, adapter, engine_factory)
+    # WalkForwardAnalysis expects dict-like settings
+    wf = WalkForwardAnalysis(settings_dict, adapter, engine_factory)
 
-    # Pull symbols/timeframe from settings safely
+    # Pull symbols/timeframe safely from dict
+    symbols = []
     try:
-        symbols = list(settings.runtime.symbols) if getattr(settings, "runtime", None) else []
+        rt = settings_dict.get("runtime", {})
+        symbols = list(rt.get("symbols", [])) or []
     except Exception:
         symbols = []
     if not symbols:
         symbols = ["BTCUSDT"]  # safe default
 
-    timeframe = getattr(getattr(settings, "runtime", object()), "primary_timeframe", None) or "1h"
+    timeframe = (settings_dict.get("runtime", {}) or {}).get("primary_timeframe") or "5m"  # <- default to 5m
 
     # --- NORMALIZE WF OUTPUTS (handles DataFrame, (trades, equity), or nested lists) ---
     def extract_trades(x):
@@ -148,18 +175,19 @@ def handle_wf(args, settings):
                 out.extend(extract_trades(item))
             return out
         if isinstance(x, tuple):
-            # Expect (trades_df, equity_df, *rest). Keep the first element if it's a DF.
-            return [x[0]] if len(x) > 0 else []
+            # Expect (trades_df, kpi_df, *rest). Keep the first element if it's a DF.
+            first = x[0] if len(x) > 0 else None
+            return [first] if (first is not None and hasattr(first, "empty")) else []
         # Assume it's already a DataFrame
-        return [x]
+        return [x] if hasattr(x, "empty") else []
 
     # Run WF per symbol and collect normalized trades
     all_trades = []
     for sym in symbols:
-        result = wf.run(sym, timeframe)  # WF expects (symbol, timeframe)
-        for d in extract_trades(result):
-            if d is not None and hasattr(d, "empty") and not d.empty:
-                all_trades.append(d)
+        result = wf.run(sym, timeframe)  # may be DataFrame or (trades_df, kpi_df)
+        for df in extract_trades(result):
+            if df is not None and hasattr(df, "empty") and not df.empty:
+                all_trades.append(df)
 
     if not all_trades:
         logger.warning("Walk-forward analysis generated no results.")

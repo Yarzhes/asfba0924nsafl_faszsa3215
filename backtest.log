@@ -1,74 +1,74 @@
-2025-08-24 11:07:25.865 - INFO - Logging level set to INFO
-2025-08-24 11:07:25.865 - INFO - Command: Walk-Forward Analysis
-2025-08-24 11:07:25.866 - INFO - FeatureStore initialized. Storing up to 3200 OHLCV bars.
-2025-08-24 11:07:25.866 - INFO - Starting walk-forward analysis...
-2025-08-24 11:07:25.866 - INFO - WF analysis range: 2023-01-01 → 2023-03-31
-2025-08-24 11:07:25.868 - INFO - Resolved WF periods -> train_days=21 days, 0:00:00, test_days=7 days, 0:00:00, purge_days=1 day, 0:00:00
-2025-08-24 11:07:25.868 - INFO - Generating windows with train_days=21 days, 0:00:00, test_days=7 days, 0:00:00, purge_days=1 day, 0:00:00
-2025-08-24 11:07:25.868 - INFO - First fold must end by: 2023-01-30 00:00:00, analysis_end=2023-03-31 00:00:00
-2025-08-24 11:07:25.868 - INFO - Final windows: [(Timestamp('2023-01-01 00:00:00'), Timestamp('2023-01-22 00:00:00'), Timestamp('2023-01-23 00:00:00'), Timestamp('2023-01-30 00:00:00')), (Timestamp('2023-01-08 00:00:00'), Timestamp('2023-01-29 00:00:00'), Timestamp('2023-01-30 00:00:00'), Timestamp('2023-02-06 00:00:00')), (Timestamp('2023-01-15 00:00:00'), Timestamp('2023-02-05 00:00:00'), Timestamp('2023-02-06 00:00:00'), Timestamp('2023-02-13 00:00:00')), (Timestamp('2023-01-22 00:00:00'), Timestamp('2023-02-12 00:00:00'), Timestamp('2023-02-13 00:00:00'), Timestamp('2023-02-20 00:00:00')), (Timestamp('2023-01-29 00:00:00'), Timestamp('2023-02-19 00:00:00'), Timestamp('2023-02-20 00:00:00'), Timestamp('2023-02-27 00:00:00')), (Timestamp('2023-02-05 00:00:00'), Timestamp('2023-02-26 00:00:00'), Timestamp('2023-02-27 00:00:00'), Timestamp('2023-03-06 00:00:00')), (Timestamp('2023-02-12 00:00:00'), Timestamp('2023-03-05 00:00:00'), Timestamp('2023-03-06 00:00:00'), Timestamp('2023-03-13 00:00:00')), (Timestamp('2023-02-19 00:00:00'), Timestamp('2023-03-12 00:00:00'), Timestamp('2023-03-13 00:00:00'), Timestamp('2023-03-20 00:00:00')), (Timestamp('2023-02-26 00:00:00'), Timestamp('2023-03-19 00:00:00'), Timestamp('2023-03-20 00:00:00'), Timestamp('2023-03-27 00:00:00'))]
-2025-08-24 11:07:25.869 - INFO - Generated 9 walk-forward windows.
-2025-08-24 11:07:25.869 - INFO - --- Running Fold 1/9 ---
-2025-08-24 11:07:25.869 - INFO - Train: 2023-01-01 to 2023-01-22, Test: 2023-01-23 to 2023-01-30
-2025-08-24 11:07:25.869 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
-2025-08-24 11:07:25.869 - INFO - Starting event runner for BTCUSDT on 5m.
-2025-08-24 11:07:25.869 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-01-23 and 2023-01-30
-2025-08-24 11:07:25.902 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-01-23 00:00:00 .. 2023-01-30 00:00:00)
-2025-08-24 11:08:15.369 - SUCCESS - Event runner finished.
-2025-08-24 11:08:15.374 - INFO - --- Running Fold 2/9 ---
-2025-08-24 11:08:15.375 - INFO - Train: 2023-01-08 to 2023-01-29, Test: 2023-01-30 to 2023-02-06
-2025-08-24 11:08:15.375 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
-2025-08-24 11:08:15.376 - INFO - Starting event runner for BTCUSDT on 5m.
-2025-08-24 11:08:15.376 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-01-30 and 2023-02-06
-2025-08-24 11:08:15.436 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-01-30 00:00:00 .. 2023-02-06 00:00:00)
-2025-08-24 11:09:15.126 - SUCCESS - Event runner finished.
-2025-08-24 11:09:15.132 - INFO - --- Running Fold 3/9 ---
-2025-08-24 11:09:15.133 - INFO - Train: 2023-01-15 to 2023-02-05, Test: 2023-02-06 to 2023-02-13
-2025-08-24 11:09:15.133 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
-2025-08-24 11:09:15.133 - INFO - Starting event runner for BTCUSDT on 5m.
-2025-08-24 11:09:15.134 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-02-06 and 2023-02-13
-2025-08-24 11:09:15.194 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-02-06 00:00:00 .. 2023-02-13 00:00:00)
-2025-08-24 11:10:14.417 - SUCCESS - Event runner finished.
-2025-08-24 11:10:14.423 - INFO - --- Running Fold 4/9 ---
-2025-08-24 11:10:14.424 - INFO - Train: 2023-01-22 to 2023-02-12, Test: 2023-02-13 to 2023-02-20
-2025-08-24 11:10:14.424 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
-2025-08-24 11:10:14.424 - INFO - Starting event runner for BTCUSDT on 5m.
-2025-08-24 11:10:14.424 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-02-13 and 2023-02-20
-2025-08-24 11:10:14.482 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-02-13 00:00:00 .. 2023-02-20 00:00:00)
-2025-08-24 11:11:14.024 - SUCCESS - Event runner finished.
-2025-08-24 11:11:14.031 - INFO - --- Running Fold 5/9 ---
-2025-08-24 11:11:14.031 - INFO - Train: 2023-01-29 to 2023-02-19, Test: 2023-02-20 to 2023-02-27
-2025-08-24 11:11:14.031 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
-2025-08-24 11:11:14.032 - INFO - Starting event runner for BTCUSDT on 5m.
-2025-08-24 11:11:14.032 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-02-20 and 2023-02-27
-2025-08-24 11:11:14.091 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-02-20 00:00:00 .. 2023-02-27 00:00:00)
-2025-08-24 11:12:13.728 - SUCCESS - Event runner finished.
-2025-08-24 11:12:13.734 - INFO - --- Running Fold 6/9 ---
-2025-08-24 11:12:13.734 - INFO - Train: 2023-02-05 to 2023-02-26, Test: 2023-02-27 to 2023-03-06
-2025-08-24 11:12:13.735 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
-2025-08-24 11:12:13.735 - INFO - Starting event runner for BTCUSDT on 5m.
-2025-08-24 11:12:13.735 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-02-27 and 2023-03-06
-2025-08-24 11:12:13.797 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-02-27 00:00:00 .. 2023-03-06 00:00:00)
-2025-08-24 11:13:13.717 - SUCCESS - Event runner finished.
-2025-08-24 11:13:13.723 - INFO - --- Running Fold 7/9 ---
-2025-08-24 11:13:13.724 - INFO - Train: 2023-02-12 to 2023-03-05, Test: 2023-03-06 to 2023-03-13
-2025-08-24 11:13:13.724 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
-2025-08-24 11:13:13.724 - INFO - Starting event runner for BTCUSDT on 5m.
-2025-08-24 11:13:13.725 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-03-06 and 2023-03-13
-2025-08-24 11:13:13.787 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-03-06 00:00:00 .. 2023-03-13 00:00:00)
-2025-08-24 11:14:13.941 - SUCCESS - Event runner finished.
-2025-08-24 11:14:13.947 - INFO - --- Running Fold 8/9 ---
-2025-08-24 11:14:13.947 - INFO - Train: 2023-02-19 to 2023-03-12, Test: 2023-03-13 to 2023-03-20
-2025-08-24 11:14:13.948 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
-2025-08-24 11:14:13.948 - INFO - Starting event runner for BTCUSDT on 5m.
-2025-08-24 11:14:13.949 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-03-13 and 2023-03-20
-2025-08-24 11:14:14.011 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-03-13 00:00:00 .. 2023-03-20 00:00:00)
-2025-08-24 11:14:48.375 - SUCCESS - Event runner finished.
-2025-08-24 11:14:48.378 - INFO - --- Running Fold 9/9 ---
-2025-08-24 11:14:48.378 - INFO - Train: 2023-02-26 to 2023-03-19, Test: 2023-03-20 to 2023-03-27
-2025-08-24 11:14:48.378 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
-2025-08-24 11:14:48.378 - INFO - Starting event runner for BTCUSDT on 5m.
-2025-08-24 11:14:48.378 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-03-20 and 2023-03-27
-2025-08-24 11:14:48.409 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-03-20 00:00:00 .. 2023-03-27 00:00:00)
-2025-08-24 11:15:16.978 - SUCCESS - Event runner finished.
-2025-08-24 11:15:16.980 - WARNING - Walk-forward analysis generated no results.
+2025-08-24 12:43:46.768 - INFO - Logging level set to INFO
+2025-08-24 12:43:46.768 - INFO - Command: Walk-Forward Analysis
+2025-08-24 12:43:46.769 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
+2025-08-24 12:43:46.769 - INFO - Starting walk-forward analysis...
+2025-08-24 12:43:46.769 - INFO - WF analysis range: 2023-01-01 → 2023-03-31
+2025-08-24 12:43:46.770 - INFO - Resolved WF periods -> train_days=21 days, 0:00:00, test_days=7 days, 0:00:00, purge_days=1 day, 0:00:00
+2025-08-24 12:43:46.771 - INFO - Generating windows with train_days=21 days, 0:00:00, test_days=7 days, 0:00:00, purge_days=1 day, 0:00:00
+2025-08-24 12:43:46.771 - INFO - First fold must end by: 2023-01-30 00:00:00, analysis_end=2023-03-31 00:00:00
+2025-08-24 12:43:46.771 - INFO - Final windows: [(Timestamp('2023-01-01 00:00:00'), Timestamp('2023-01-22 00:00:00'), Timestamp('2023-01-23 00:00:00'), Timestamp('2023-01-30 00:00:00')), (Timestamp('2023-01-08 00:00:00'), Timestamp('2023-01-29 00:00:00'), Timestamp('2023-01-30 00:00:00'), Timestamp('2023-02-06 00:00:00')), (Timestamp('2023-01-15 00:00:00'), Timestamp('2023-02-05 00:00:00'), Timestamp('2023-02-06 00:00:00'), Timestamp('2023-02-13 00:00:00')), (Timestamp('2023-01-22 00:00:00'), Timestamp('2023-02-12 00:00:00'), Timestamp('2023-02-13 00:00:00'), Timestamp('2023-02-20 00:00:00')), (Timestamp('2023-01-29 00:00:00'), Timestamp('2023-02-19 00:00:00'), Timestamp('2023-02-20 00:00:00'), Timestamp('2023-02-27 00:00:00')), (Timestamp('2023-02-05 00:00:00'), Timestamp('2023-02-26 00:00:00'), Timestamp('2023-02-27 00:00:00'), Timestamp('2023-03-06 00:00:00')), (Timestamp('2023-02-12 00:00:00'), Timestamp('2023-03-05 00:00:00'), Timestamp('2023-03-06 00:00:00'), Timestamp('2023-03-13 00:00:00')), (Timestamp('2023-02-19 00:00:00'), Timestamp('2023-03-12 00:00:00'), Timestamp('2023-03-13 00:00:00'), Timestamp('2023-03-20 00:00:00')), (Timestamp('2023-02-26 00:00:00'), Timestamp('2023-03-19 00:00:00'), Timestamp('2023-03-20 00:00:00'), Timestamp('2023-03-27 00:00:00'))]
+2025-08-24 12:43:46.771 - INFO - Generated 9 walk-forward windows.
+2025-08-24 12:43:46.771 - INFO - --- Running Fold 1/9 ---
+2025-08-24 12:43:46.772 - INFO - Train: 2023-01-01 to 2023-01-22, Test: 2023-01-23 to 2023-01-30
+2025-08-24 12:43:46.773 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
+2025-08-24 12:43:46.773 - INFO - Starting event runner for BTCUSDT on 5m.
+2025-08-24 12:43:46.773 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-01-23 and 2023-01-30
+2025-08-24 12:43:46.807 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-01-23 00:00:00 .. 2023-01-30 00:00:00)
+2025-08-24 12:44:26.640 - SUCCESS - Event runner finished.
+2025-08-24 12:44:26.642 - INFO - --- Running Fold 2/9 ---
+2025-08-24 12:44:26.643 - INFO - Train: 2023-01-08 to 2023-01-29, Test: 2023-01-30 to 2023-02-06
+2025-08-24 12:44:26.643 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
+2025-08-24 12:44:26.643 - INFO - Starting event runner for BTCUSDT on 5m.
+2025-08-24 12:44:26.643 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-01-30 and 2023-02-06
+2025-08-24 12:44:26.680 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-01-30 00:00:00 .. 2023-02-06 00:00:00)
+2025-08-24 12:45:01.436 - SUCCESS - Event runner finished.
+2025-08-24 12:45:01.439 - INFO - --- Running Fold 3/9 ---
+2025-08-24 12:45:01.439 - INFO - Train: 2023-01-15 to 2023-02-05, Test: 2023-02-06 to 2023-02-13
+2025-08-24 12:45:01.439 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
+2025-08-24 12:45:01.439 - INFO - Starting event runner for BTCUSDT on 5m.
+2025-08-24 12:45:01.439 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-02-06 and 2023-02-13
+2025-08-24 12:45:01.477 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-02-06 00:00:00 .. 2023-02-13 00:00:00)
+2025-08-24 12:45:33.143 - SUCCESS - Event runner finished.
+2025-08-24 12:45:33.146 - INFO - --- Running Fold 4/9 ---
+2025-08-24 12:45:33.146 - INFO - Train: 2023-01-22 to 2023-02-12, Test: 2023-02-13 to 2023-02-20
+2025-08-24 12:45:33.146 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
+2025-08-24 12:45:33.146 - INFO - Starting event runner for BTCUSDT on 5m.
+2025-08-24 12:45:33.146 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-02-13 and 2023-02-20
+2025-08-24 12:45:33.179 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-02-13 00:00:00 .. 2023-02-20 00:00:00)
+2025-08-24 12:46:05.209 - SUCCESS - Event runner finished.
+2025-08-24 12:46:05.211 - INFO - --- Running Fold 5/9 ---
+2025-08-24 12:46:05.211 - INFO - Train: 2023-01-29 to 2023-02-19, Test: 2023-02-20 to 2023-02-27
+2025-08-24 12:46:05.211 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
+2025-08-24 12:46:05.211 - INFO - Starting event runner for BTCUSDT on 5m.
+2025-08-24 12:46:05.212 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-02-20 and 2023-02-27
+2025-08-24 12:46:05.244 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-02-20 00:00:00 .. 2023-02-27 00:00:00)
+2025-08-24 12:46:36.426 - SUCCESS - Event runner finished.
+2025-08-24 12:46:36.429 - INFO - --- Running Fold 6/9 ---
+2025-08-24 12:46:36.429 - INFO - Train: 2023-02-05 to 2023-02-26, Test: 2023-02-27 to 2023-03-06
+2025-08-24 12:46:36.429 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
+2025-08-24 12:46:36.430 - INFO - Starting event runner for BTCUSDT on 5m.
+2025-08-24 12:46:36.430 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-02-27 and 2023-03-06
+2025-08-24 12:46:36.464 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-02-27 00:00:00 .. 2023-03-06 00:00:00)
+2025-08-24 12:47:06.872 - SUCCESS - Event runner finished.
+2025-08-24 12:47:06.874 - INFO - --- Running Fold 7/9 ---
+2025-08-24 12:47:06.874 - INFO - Train: 2023-02-12 to 2023-03-05, Test: 2023-03-06 to 2023-03-13
+2025-08-24 12:47:06.875 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
+2025-08-24 12:47:06.875 - INFO - Starting event runner for BTCUSDT on 5m.
+2025-08-24 12:47:06.875 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-03-06 and 2023-03-13
+2025-08-24 12:47:06.907 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-03-06 00:00:00 .. 2023-03-13 00:00:00)
+2025-08-24 12:47:37.290 - SUCCESS - Event runner finished.
+2025-08-24 12:47:37.293 - INFO - --- Running Fold 8/9 ---
+2025-08-24 12:47:37.293 - INFO - Train: 2023-02-19 to 2023-03-12, Test: 2023-03-13 to 2023-03-20
+2025-08-24 12:47:37.293 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
+2025-08-24 12:47:37.293 - INFO - Starting event runner for BTCUSDT on 5m.
+2025-08-24 12:47:37.293 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-03-13 and 2023-03-20
+2025-08-24 12:47:37.326 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-03-13 00:00:00 .. 2023-03-20 00:00:00)
+2025-08-24 12:48:09.263 - SUCCESS - Event runner finished.
+2025-08-24 12:48:09.269 - INFO - --- Running Fold 9/9 ---
+2025-08-24 12:48:09.270 - INFO - Train: 2023-02-26 to 2023-03-19, Test: 2023-03-20 to 2023-03-27
+2025-08-24 12:48:09.270 - INFO - FeatureStore initialized. Storing up to 400 OHLCV bars.
+2025-08-24 12:48:09.270 - INFO - Starting event runner for BTCUSDT on 5m.
+2025-08-24 12:48:09.270 - INFO - Loading OHLCV for BTCUSDT (5m) from csv between 2023-03-20 and 2023-03-27
+2025-08-24 12:48:09.312 - SUCCESS - Loaded 2016 rows from data\BTCUSDT_5m.csv within [2023-03-20 00:00:00 .. 2023-03-27 00:00:00)
+2025-08-24 12:48:39.632 - SUCCESS - Event runner finished.
+2025-08-24 12:48:39.635 - WARNING - Walk-forward analysis generated no results.

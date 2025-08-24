@@ -17,8 +17,9 @@ Design Principles:
 """
 
 from collections import defaultdict
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 
+import math
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -89,7 +90,103 @@ class FeatureStore:
 
         # Feature state and cache
         self._feature_states: Dict[str, Dict[str, object]] = defaultdict(dict)
-        self._feature_cache: Dict[str, Dict[str, object]] = defaultdict(dict)
+        # Cache layout: _feature_cache[symbol][pd.Timestamp] -> dict of feature groups
+        self._feature_cache: Dict[str, Dict[pd.Timestamp, Dict[str, object]]] = defaultdict(dict)
+
+    # -------------------------------------------------------------------------
+    # Helpers (FIX B): normalize timestamps and provide robust feature lookups
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _to_timestamp(ts_like: Any) -> Optional[pd.Timestamp]:
+        """
+        Coerce various inputs (Timestamp, str, int epoch s/ms/ns) to tz-naive pd.Timestamp.
+        """
+        if ts_like is None:
+            return None
+        try:
+            if isinstance(ts_like, (int, np.integer)):
+                # Infer unit by digit length (<=10: s, <=13: ms, else ns)
+                v = int(ts_like)
+                digits = int(math.log10(abs(v))) + 1 if v != 0 else 1
+                if digits <= 10:
+                    ts = pd.to_datetime(v, unit="s")
+                elif digits <= 13:
+                    ts = pd.to_datetime(v, unit="ms")
+                else:
+                    ts = pd.to_datetime(v, unit="ns")
+            else:
+                ts = pd.to_datetime(ts_like)
+        except Exception:
+            return None
+
+        # make tz-naive
+        try:
+            if ts.tzinfo is not None:
+                ts = ts.tz_convert(None)
+        except Exception:
+            pass
+        try:
+            ts = ts.tz_localize(None)
+        except Exception:
+            pass
+        return ts
+
+    def get_features(self, symbol: str, timestamp: pd.Timestamp) -> Optional[Dict]:
+        """
+        Retrieves the dictionary of all computed features for a specific timestamp.
+        If exact match is missing, falls back to nearest earlier timestamp.
+        """
+        cache = self._feature_cache.get(symbol, {})
+        if not cache:
+            return None
+
+        # 1) Try exact lookup first
+        if timestamp in cache:
+            return cache[timestamp]
+
+        # 2) Convert keys to sorted list of timestamps
+        try:
+            sorted_keys = sorted(cache.keys())
+        except Exception:
+            sorted_keys = list(cache.keys())
+
+        # 3) Find nearest timestamp <= requested one
+        for ts in reversed(sorted_keys):
+            if pd.Timestamp(ts) <= pd.Timestamp(timestamp):
+                logger.debug(
+                    "[FeatureStore] Fallback feature hit for %s at %s (using nearest <= %s)",
+                    symbol, timestamp, ts
+                )
+                return cache[ts]
+
+        # 4) No match found
+        logger.debug(
+            "[FeatureStore] No features found for %s at %s, cache has %d keys",
+            symbol, timestamp, len(cache)
+        )
+        return None
+
+
+    # Convenience helpers expected by the engine (FIX B)
+    def get_features_at_or_before(self, symbol: str, timestamp: Any) -> Optional[Dict]:
+        """Alias for get_features(nearest=True)."""
+        return self.get_features(symbol, timestamp, nearest=True)
+
+    def get_features_nearest(self, symbol: str, timestamp: Any) -> Optional[Dict]:
+        """Return nearest (at-or-before) features."""
+        return self.get_features(symbol, timestamp, nearest=True)
+
+    def get_latest_features(self, symbol: str) -> Optional[Dict]:
+        """Return the most recently cached feature dict for a symbol."""
+        sym_cache = self._feature_cache.get(symbol, {})
+        if not sym_cache:
+            return None
+        try:
+            latest_key = max(sym_cache.keys())
+            return sym_cache.get(latest_key)
+        except Exception:
+            return None
+    # -------------------------------------------------------------------------
 
     def _get_state(self, symbol: str, state_key: str, state_class):
         """Initializes and returns a state object for a given symbol."""
@@ -151,6 +248,38 @@ class FeatureStore:
         # After ingesting, compute features for the new bar's timestamp
         self._compute_all_features(symbol, timeframe, new_row)
 
+    # Optional: unified event ingestion (kept minimal; original code referenced it in __main__)
+    def ingest_event(self, event: MarketEvent) -> None:
+        """
+        Ingests various market events and updates internal stores.
+        This keeps the original design intent while remaining minimal.
+        """
+        try:
+            if isinstance(event, KlineEvent):
+                self.on_bar(
+                    symbol=event.symbol,
+                    timeframe=event.timeframe,
+                    bar={
+                        "timestamp": event.timestamp,
+                        "open": event.open,
+                        "high": event.high,
+                        "low": event.low,
+                        "close": event.close,
+                        "volume": event.volume,
+                    },
+                )
+            elif isinstance(event, BookTickerEvent):
+                self._ingest_book_ticker(event)
+            elif isinstance(event, MarkPriceEvent):
+                self._ingest_mark_price(event)
+            elif isinstance(event, ForceOrderEvent):
+                self._ingest_force_order(event)
+            elif isinstance(event, DepthEvent):
+                self._ingest_depth(event)
+            elif isinstance(event, AggTradeEvent):
+                self._ingest_agg_trade(event)
+        except Exception as e:
+            logger.exception("Error while ingesting event {}: {}", type(event).__name__, e)
 
     def _compute_all_features(self, symbol: str, timeframe: str, bar: pd.DataFrame):
         """Computes and caches all component features for a given timestamp."""
@@ -161,7 +290,7 @@ class FeatureStore:
         timestamp = bar.index[0]
 
         feature_config = self._settings["features"]
-        feature_dict = {}
+        feature_dict: Dict[str, object] = {}
 
         # Trend
         trend_feats = compute_trend_features(ohlcv, **feature_config["trend"])
@@ -185,11 +314,11 @@ class FeatureStore:
 
         self._feature_cache[symbol][timestamp] = feature_dict
         logger.debug(f"Computed features for {symbol} at {timestamp}: {feature_dict}")
-            
-    def get_features(self, symbol: str, timestamp: pd.Timestamp) -> Optional[Dict]:
-        """Retrieves the dictionary of all computed features for a specific timestamp."""
-        return self._feature_cache.get(symbol, {}).get(timestamp)
-    
+
+    # NOTE: kept signature but enhanced implementation above (FIX B provides robustness & nearest)
+    # def get_features(self, symbol: str, timestamp: pd.Timestamp) -> Optional[Dict]:
+    #     return self._feature_cache.get(symbol, {}).get(timestamp)
+
     def _ingest_book_ticker(self, ticker: BookTickerEvent) -> None:
         """Updates the latest book ticker for a symbol."""
         self._latest_book_ticker[ticker.symbol] = ticker
@@ -300,13 +429,10 @@ class FeatureStore:
 
     def prune_and_get_liquidations(self, symbol: str, cutoff_ts: int) -> list:
         """Prunes old liquidations and returns the remaining recent ones."""
-        
-        # Filter out old events, keeping only those more recent than the cutoff
         recent_events = [
             event for event in self._recent_liquidations.get(symbol, [])
             if event[0] >= cutoff_ts
         ]
-        
         self._recent_liquidations[symbol] = recent_events
         return recent_events
 
@@ -333,7 +459,6 @@ class FeatureStore:
             return self._funding_provider.get_history(symbol)
         return None
 
-
     def get_vwap_features(self, symbol: str) -> Optional[dict]:
         """Retrieves cached VWAP features for a symbol."""
         return self._feature_cache.get(symbol, {}).get('vwap')
@@ -353,14 +478,10 @@ if __name__ == "__main__":
     # Note: The settings dictionary would typically be loaded from a config file.
     mock_settings = {
         'features': {
-            'vwap': {'vwap_window': 20, 'vwap_std_devs': (1.0, 2.0)},
-            'cvd': {'cvd_lookback_seconds': 300, 'cvd_slope_period': 20},
-            'orderbook_v2': {
-                'depth_levels_N': 10,
-                'book_flip_min_delta': 0.15,
-                'book_flip_persistence_ticks': 5,
-                'slippage_trade_size': 1000
-            }
+            'trend': {'ema_short': 12, 'ema_medium': 26, 'ema_long': 50, 'adx_period': 14},
+            'momentum': {'rsi_period': 14, 'macd_fast': 12, 'macd_slow': 26, 'macd_signal': 9},
+            'volatility': {'atr_period': 14, 'bbands_period': 20, 'bbands_std': 2.0},
+            'volume_flow': {'vwap_window': 20, 'volume_z_window': 50},
         }
     }
     store = FeatureStore(warmup_periods=50, settings=mock_settings)
@@ -377,15 +498,21 @@ if __name__ == "__main__":
     store.ingest_event(depth1)
     store.ingest_event(trade1)
     
-    logger.info("Ingested events and computed features:")
+    logger.info("Ingested events and computed features.")
 
-    # 3. Check feature accessors
+    # 3. Check robust feature accessors (FIX B)
+    ts_exact = pd.to_datetime(1672531200000, unit="ms")
+    ts_s = int(ts_exact.value // 10**9)
+    logger.info("Exact: {}", store.get_features("BTCUSDT", ts_exact) is not None)
+    logger.info("Epoch seconds: {}", store.get_features("BTCUSDT", ts_s, nearest=True) is not None)
+
+    # 4. Other accessors
     vwap_feats = store.get_vwap_features("BTCUSDT")
     ob_feats = store.get_orderbook_features_v2("BTCUSDT")
     cvd_feats = store.get_cvd_features("BTCUSDT")
 
     if vwap_feats:
-        logger.info(f"\nVWAP Features for BTCUSDT: VWAP = {vwap_feats.get('vwap')}")
+        logger.info(f"VWAP Features for BTCUSDT: {vwap_feats}")
     if ob_feats:
         logger.info(f"Orderbook V2 Features for BTCUSDT: Imbalance = {ob_feats.imbalance_ratio:.4f}")
     if cvd_feats:

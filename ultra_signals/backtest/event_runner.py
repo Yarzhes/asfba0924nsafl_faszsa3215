@@ -6,6 +6,104 @@ from ultra_signals.core.custom_types import EnsembleDecision, RiskEvent, Positio
 from ultra_signals.risk.portfolio import evaluate_portfolio, Portfolio
 
 
+# ------------------------ UNIVERSAL DECISION TRACE HELPERS ------------------------
+
+def _trace_reject(symbol, ts, reason, **kv):
+    """
+    Single-line debug log to explain why a bar did not produce an entry.
+    """
+    extras = " ".join(f"{k}={v}" for k, v in kv.items() if v is not None)
+    logger.debug(f"[DECISION] reject symbol={symbol} ts={ts} reason={reason} {extras}")
+
+def _safe_get_attr(obj, path, default=None):
+    """
+    _safe_get_attr(features, 'trend.adx') -> value or default
+    Works with either attribute objects or dicts.
+    """
+    cur = obj
+    for p in str(path).split('.'):
+        if cur is None:
+            return default
+        # support dicts and objects
+        if isinstance(cur, dict):
+            cur = cur.get(p, None)
+        else:
+            cur = getattr(cur, p, None)
+    return cur if cur is not None else default
+
+def _peek_features(feature_store, symbol, timeframe, ts):
+    """
+    Best-effort extraction of a small subset of features for logging
+    without depending on any specific FeatureStore API.
+    Returns dict like {'adx':..., 'rsi':..., 'atr_percentile':...} (keys may be None).
+    """
+    feats = None
+
+    # Try common getters
+    for meth in ("get_features", "get_latest", "latest", "get"):
+        f = getattr(feature_store, meth, None)
+        if callable(f):
+            try:
+                # try the most specific signature first
+                for args in (
+                    (symbol, timeframe, ts),
+                    (symbol, timeframe),
+                    (symbol,),
+                    tuple(),
+                ):
+                    try:
+                        feats = f(*args)
+                        if feats is not None:
+                            break
+                    except TypeError:
+                        continue
+                if feats is not None:
+                    break
+            except Exception:
+                pass
+
+    # Try digging into common caches
+    if feats is None:
+        for cache_name in ("cache", "store", "buffer", "latest_features", "features"):
+            cache = getattr(feature_store, cache_name, None)
+            if cache is None:
+                continue
+            candidate = None
+            # Try direct dict access patterns
+            try:
+                candidate = cache.get((symbol, timeframe, ts)) or cache.get((symbol, timeframe)) \
+                            or cache.get(symbol) or cache.get(timeframe)
+            except Exception:
+                candidate = None
+            if candidate is None:
+                # last resort: take anything that looks like features
+                if isinstance(cache, dict):
+                    try:
+                        candidate = next(iter(cache.values()))
+                    except Exception:
+                        candidate = None
+            if candidate is not None:
+                feats = candidate
+                break
+
+    # Now extract a few useful fields if present
+    adx  = _safe_get_attr(feats, "trend.adx", None)
+    rsi  = _safe_get_attr(feats, "momentum.rsi", None)
+    atrp = _safe_get_attr(feats, "volatility.atr_percentile", None)
+
+    # Float formatting/rounding (only if numeric)
+    def _rf(x, nd=3):
+        try:
+            return round(float(x), nd)
+        except Exception:
+            return None
+
+    return {"adx": _rf(adx, 2), "rsi": _rf(rsi, 2), "atr_percentile": _rf(atrp, 3)}
+
+
+# ----------------------------------------------------------------------------------
+
+
 class EventRunner:
     """
     Orchestrates the backtest event loop, simulates trade execution,
@@ -213,7 +311,7 @@ class EventRunner:
             # 0) Explicit support for your mock: generate_signal(ohlcv_segment, symbol)
             if hasattr(engine, "generate_signal"):
                 try:
-                    # >>> CHANGE HERE: pass keyword args so tests can inspect kwargs['ohlcv_segment']
+                    # pass keyword args so tests can inspect kwargs['ohlcv_segment']
                     res0 = engine.generate_signal(ohlcv_segment=ohlcv_segment, symbol=symbol)
                     norm0 = _normalize_decision(res0)
                     if norm0 is not None:
@@ -265,7 +363,7 @@ class EventRunner:
                     except Exception:
                         continue
 
-            # 3) Fallback to FLAT (valid literal for your model)
+            # 3) Fallback to FLAT
             ts_epoch = int(pd.Timestamp(timestamp).timestamp())
             return EnsembleDecision(
                 ts=ts_epoch,
@@ -280,9 +378,40 @@ class EventRunner:
 
         decision = _resolve_decision(self.signal_engine)
 
-        # 6) Handle entries (LONG/SHORT) with portfolio gating.
+        # ---------------------- NEW: LOG WHY NO TRADE ON THIS BAR ----------------------
+        # If we didn't get a LONG/SHORT, emit a detailed debug line with features + confidence.
         action = getattr(decision, "decision", None)
+        if action not in {"LONG", "SHORT"}:
+            fbits = _peek_features(self.feature_store, symbol, timeframe, timestamp)
+            # Try to infer a helpful reason label
+            reason = "flat_no_entry"
+            vd = getattr(decision, "vote_detail", {}) or {}
+            vetoes = getattr(decision, "vetoes", []) or []
+            if isinstance(vd, dict):
+                thr = vd.get("threshold") or vd.get("enter_threshold") or vd.get("vote_threshold")
+                score = vd.get("score") or vd.get("votes") or vd.get("confidence")
+                if thr is not None and score is not None and float(score) < float(thr):
+                    reason = "score_below_threshold"
 
+            _trace_reject(
+                symbol,
+                timestamp,
+                reason,
+                side=action,
+                confidence=(round(float(getattr(decision, "confidence", 0.0)), 3) if hasattr(decision, "confidence") else None),
+                score=(round(float(vd.get("score")), 3) if isinstance(vd.get("score", None), (int, float)) else None),
+                votes=(round(float(vd.get("votes")), 3) if isinstance(vd.get("votes", None), (int, float)) else None),
+                threshold=(round(float(vd.get("threshold")), 3) if isinstance(vd.get("threshold", None), (int, float)) else None),
+                adx=fbits.get("adx"),
+                rsi=fbits.get("rsi"),
+                atr_pct=fbits.get("atr_percentile"),
+                vetoes=len(vetoes) if vetoes else None,
+            )
+            # no entry; fall through to return
+            return
+        # -------------------------------------------------------------------------------
+
+        # 6) Handle entries (LONG/SHORT) with portfolio gating.
         if action in {"LONG", "SHORT"}:
             # Always evaluate portfolio gate (even if a position is already open)
             allowed, size_scale, events = evaluate_portfolio(decision, self.portfolio, self.settings)

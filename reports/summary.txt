@@ -1,9 +1,12 @@
 Backtest Performance Summary
 ==============================
-total_pnl: 0
+total_pnl: -1.08
 total_trades: 1
-win_rate_pct: 0.0000
-profit_factor: inf
-sharpe_ratio: nan
-average_win: 0
-average_loss: 0
+win_rate_pct: 0.00
+avg_pnl: -1.08
+average_win: 0.00
+average_loss: -1.08
+profit_factor: 0.00
+sharpe: 0.00
+max_drawdown: 0.00
+avg_hold_bars: 0.00

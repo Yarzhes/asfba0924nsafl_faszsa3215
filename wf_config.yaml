@@ -47,10 +47,10 @@ engine:
     trend: 0.35        # was 0.5
     volatility: 0.20   # was 0.0   ← give volatility some weight
   thresholds:
-    enter: 0.50        # was 0.6   ← slightly easier to enter
-    exit:  0.35        # was 0.4   ← slightly easier to exit
+    enter: 0.40        # was 0.6   ← slightly easier to enter
+    exit:  0.30        # was 0.4   ← slightly easier to exit
 ensemble:
-  majority_threshold: 0.55  # was 0.6
+  majority_threshold: 0.50  # was 0.6
   veto_band_pierce: false   # was true
   veto_trend_flip:  false   # was true
 features:
@@ -126,14 +126,26 @@ walkforward:
     train_period: 21d
     test_period: 7d
     advance_by: 10d
+# (keep prior changes) and additionally tweak regime weights:
+
 weights_profiles:
   chop:
-    derivatives: 0.1
-    flow: 0.25
-    momentum: 0.2
-    orderbook: 0.15
-    trend: 0.1
-    volatility: 0.2
+    derivatives: 0.08
+    flow: 0.20
+    momentum: 0.28   # up from 0.20
+    orderbook: 0.12
+    trend: 0.20      # up from 0.10
+    volatility: 0.12
+
+  trend:
+    derivatives: 0.12
+    flow: 0.16
+    momentum: 0.24   # up from 0.22
+    orderbook: 0.08
+    trend: 0.32      # up from 0.30
+    volatility: 0.08
+
+
   mean_revert:
     derivatives: 0.15
     flow: 0.22
@@ -141,10 +153,4 @@ weights_profiles:
     orderbook: 0.13
     trend: 0.15
     volatility: 0.13
-  trend:
-    derivatives: 0.14
-    flow: 0.18
-    momentum: 0.22
-    orderbook: 0.08
-    trend: 0.3
-    volatility: 0.08
+

@@ -1,11 +1,11 @@
 import logging
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from ultra_signals.core.custom_types import SubSignal, EnsembleDecision
 
 logger = logging.getLogger(__name__)
 
 # FIX: helper to safely derive both a signed score [-1,1] and a probability [0,1]
-def _signed_and_prob_from_conf(s: SubSignal) -> (float, float):
+def _signed_and_prob_from_conf(s: SubSignal) -> Tuple[float, float]:
     """
     Returns (signed_confidence, probability) for a subsignal.
     - If confidence_calibrated is already 0..1, use that for prob; signed = map back to [-1,1] using direction.
@@ -39,11 +39,26 @@ def _signed_and_prob_from_conf(s: SubSignal) -> (float, float):
     return signed, prob
 
 
+def _norm_dir(d: str) -> str:
+    if not d:
+        return "FLAT"
+    d = str(d).upper()
+    if d in ("LONG", "BUY"):
+        return "LONG"
+    if d in ("SHORT", "SELL"):
+        return "SHORT"
+    return "FLAT"
+
+
 def combine_subsignals(
     subsignals: List[SubSignal], profile: str, settings: Dict
 ) -> EnsembleDecision:
     """
     Combines sub-signals into a single decision using weighted voting.
+
+    Modes:
+      - Legacy (your original math): set `ensemble.use_prob_mass: false`
+      - Fixed prob-mass combiner (recommended): set `ensemble.use_prob_mass: true` (default)
     """
     if not subsignals:
         raise ValueError("Sub-signal list cannot be empty.")
@@ -53,6 +68,8 @@ def combine_subsignals(
     tf = subsignals[0].tf
 
     ensemble_settings = settings.get("ensemble", {})
+    use_prob_mass = bool(ensemble_settings.get("use_prob_mass", True))  # default to fixed path
+
     # CHANGED: read vote_threshold from ensemble block first, then fallback to root, then default 0.5
     vote_threshold_raw = ensemble_settings.get(
         "vote_threshold", 
@@ -81,125 +98,174 @@ def combine_subsignals(
     confidence_floor   = float(ensemble_settings.get("confidence_floor", 0.60))
     # <<< SPRINT-8 ADDITIONS <<< -----------------------------------------------
 
+    # NOTE: weights_profiles is your original key; keep it for backward-compat
     weights = settings.get("weights_profiles", {}).get(profile, {})
     logger.debug(f"Combining {len(subsignals)} subsignals with profile '{profile}' and weights: {weights}")
     for s in subsignals:
         logger.debug(f"  Subsignal: {s.strategy_id}, Direction: {s.direction}, Confidence: {s.confidence_calibrated}")
 
-    weighted_sum = 0.0
+    # ----------------------------
+    # Common accumulation section:
+    # ----------------------------
+    weighted_sum = 0.0       # legacy signed total (may be negative)
     long_voters = 0
     short_voters = 0
-    total_weight = 0
+    total_weight = 0.0
 
-    # >>> SPRINT-8 ADDITIONS >>> -----------------------------------------------
-    # Track side-specific weighted sums for margin-of-victory logic
+    # Sprint-8 side-specific probability mass
     w_long = 0.0
     w_short = 0.0
-    # <<< SPRINT-8 ADDITIONS <<< -----------------------------------------------
+
+    # Also keep normalized directions + prob for debug
+    dbg_rows = []
 
     for s in subsignals:
         weight = weights.get(s.strategy_id, 1.0)
-        # FIX: prevent negative weights from breaking sums
-        if weight < 0:
+        if weight < 0:  # FIX: prevent negative weights from breaking sums
             weight = 0.0
         total_weight += weight
+
+        # Normalize direction for safety
+        s_dir = _norm_dir(getattr(s, "direction", "FLAT"))
 
         # FIX: use normalized pair (signed, prob)
         signed_c, prob_c = _signed_and_prob_from_conf(s)
 
-        direction_multiplier = 1 if s.direction == "LONG" else -1 if s.direction == "SHORT" else 0
-        # keep original direction math for normalized_sum (uses signed confidence)
+        # LEGACY PATH accumulation (signed)
+        direction_multiplier = 1 if s_dir == "LONG" else -1 if s_dir == "SHORT" else 0
         weighted_sum += weight * signed_c * direction_multiplier
 
-        # Count voters for original logic
-        if s.direction == "LONG":
+        # voter counts (legacy)
+        if s_dir == "LONG":
             long_voters += 1
-        elif s.direction == "SHORT":
+        elif s_dir == "SHORT":
             short_voters += 1
 
-        # >>> SPRINT-8 ADDITIONS >>> -------------------------------------------
-        # Side-specific weighted totals (use probability so they are non-negative)
-        if s.direction == "LONG":
+        # Probability mass (non-negative)
+        if s_dir == "LONG":
             w_long += weight * prob_c
-        elif s.direction == "SHORT":
+        elif s_dir == "SHORT":
             w_short += weight * prob_c
-        # <<< SPRINT-8 ADDITIONS <<< -------------------------------------------
+
+        dbg_rows.append(f"{getattr(s,'strategy_id','?')}:{s_dir} p={prob_c:.3f} w={weight:.2f} signed={signed_c:.3f}")
 
     if total_weight > 0:
         normalized_sum = weighted_sum / total_weight
     else:
         normalized_sum = 0.0
-    
-    logger.debug(f"Total weight: {total_weight:.2f}, Weighted sum: {weighted_sum:.2f}, Normalized sum: {normalized_sum:.2f}")
 
-    # Original thresholding using normalized_sum
+    logger.debug(
+        "Accumulated: total_weight=%.3f weighted_sum=%.3f normalized_sum=%.3f w_long=%.3f w_short=%.3f | subs=[%s]",
+        total_weight, weighted_sum, normalized_sum, w_long, w_short, "; ".join(dbg_rows)
+    )
+
+    # ------------------------------------------------------------
+    # MODE A) LEGACY decision using normalized_sum (kept intact)
+    # ------------------------------------------------------------
+    decision_dir_legacy = "FLAT"
+    agree_count_legacy = 0
     if normalized_sum >= vote_threshold:
-        decision_dir = "LONG"
-        agree_count = long_voters
+        decision_dir_legacy = "LONG"
+        agree_count_legacy = long_voters
     elif normalized_sum <= -vote_threshold:
-        decision_dir = "SHORT"
-        agree_count = short_voters
-    else:
-        decision_dir = "FLAT"
-        agree_count = 0
+        decision_dir_legacy = "SHORT"
+        agree_count_legacy = short_voters
 
-    # >>> SPRINT-8 ADDITIONS >>> -----------------------------------------------
-    # Sprint-8 abstain rules layered on top:
-    # - Compute the winning side's raw weight (w_max) and margin
+    # ------------------------------------------------------------
+    # MODE B) FIXED decision using probability mass (non-negative)
+    # ------------------------------------------------------------
+    # Winner mass & margin
     w_max = max(w_long, w_short)
     margin = abs(w_long - w_short)
+    total_mass = w_long + w_short
 
-    # If we picked LONG/SHORT above, enforce extra abstain conditions
-    abstain_reason = ""
+    if w_long > w_short:
+        side_pm = "LONG"
+    elif w_short > w_long:
+        side_pm = "SHORT"
+    else:
+        side_pm = "FLAT"
 
-    if decision_dir != "FLAT":
-        # Require clear margin of victory
+    # ensemble probability for the chosen side (clean 0..1)
+    if total_mass > 0 and side_pm != "FLAT":
+        p_ens = (w_long / total_mass) if side_pm == "LONG" else (w_short / total_mass)
+    else:
+        p_ens = 0.0
+
+    # agree count for chosen side
+    agree_pm = long_voters if side_pm == "LONG" else short_voters if side_pm == "SHORT" else 0
+
+    # start from PM-based side and apply abstain gates
+    decision_dir_pm = side_pm
+    abstain_reason_pm = ""
+    if decision_dir_pm != "FLAT":
         if margin < margin_of_victory:
-            abstain_reason = "LOW_MARGIN"
-            decision_dir = "FLAT"
-            agree_count = 0
+            abstain_reason_pm = "LOW_MARGIN"
+            decision_dir_pm = "FLAT"
+            agree_pm = 0
+        elif agree_pm < min_agree:
+            abstain_reason_pm = "LOW_AGREE"
+            decision_dir_pm = "FLAT"
+            agree_pm = 0
+        elif p_ens < confidence_floor:
+            abstain_reason_pm = "LOW_CONF"
+            decision_dir_pm = "FLAT"
+            agree_pm = 0
+    else:
+        abstain_reason_pm = "TIE_OR_ZERO"
 
-        # Require minimum agreement count (per profile)
-        elif agree_count < min_agree:
-            abstain_reason = "LOW_AGREE"
-            decision_dir = "FLAT"
-            agree_count = 0
-
-        # Require minimum ensemble probability (confidence floor)
-        # We use w_max (sum of weight*prob) as proxy for ensemble prob → non-negative
-        elif w_max < confidence_floor:
-            abstain_reason = "LOW_CONF"
-            decision_dir = "FLAT"
-            agree_count = 0
-    # <<< SPRINT-8 ADDITIONS <<< -----------------------------------------------
-
+    # check vetoes (common to both modes)
     vetoes = [s.reasons.get("veto") for s in subsignals if getattr(s, "reasons", None) and s.reasons.get("veto")]
     if vetoes:
         logger.debug(f"Vetoes found: {vetoes}. Overriding decision to FLAT.")
-        decision_dir = "FLAT"
-        # >>> SPRINT-8 ADDITIONS >>> -------------------------------------------
-        # If we abstained due to veto, prefer to surface reason as VETO
-        abstain_reason = abstain_reason or "VETO"
-        # <<< SPRINT-8 ADDITIONS <<< -------------------------------------------
+        # Prefer to surface "VETO" only if we haven't abstained already
+        if not abstain_reason_pm:
+            abstain_reason_pm = "VETO"
+        decision_dir_pm = "FLAT"
+        agree_pm = 0
 
-    # >>>>>> CHANGE APPLIED (Fix #3): confidence from |w_max|, not normalized_sum >>>>>>
-    # Confidence should reflect the magnitude of the winning side’s weight, clipped to [0, 1].
-    confidence = min(1.0, abs(w_max))
-    # <<<<<< CHANGE APPLIED <<<<<<
-
-    vote_detail = {
-        # NOTE: keep normalized_sum here for telemetry/UI; tests look for this number.
-        "weighted_sum": round(normalized_sum, 3),
-        "agree": agree_count,
-        "total": len(subsignals),
-        "profile": profile,
-    }
-
-    # >>> SPRINT-8 ADDITIONS >>> -----------------------------------------------
-    # Also include "reason" so downstream formatters can show why we abstained
-    if abstain_reason:
-        vote_detail["reason"] = abstain_reason
-    # <<< SPRINT-8 ADDITIONS <<< -----------------------------------------------
+    # ------------------------------------------------------------
+    # Select mode to output result
+    # ------------------------------------------------------------
+    if use_prob_mass:
+        decision_dir = decision_dir_pm
+        agree_count = agree_pm
+        confidence = float(p_ens)  # clean 0..1
+        # Keep your original normalized_sum for backward compatibility,
+        # but also include PM telemetry so it's obvious in logs/UI.
+        vote_detail = {
+            "weighted_sum": round(normalized_sum, 3),     # legacy number (may be negative)
+            "weighted_sum_pm": round(w_max, 3),           # non-negative winner mass
+            "agree": agree_count,
+            "total": len(subsignals),
+            "profile": profile,
+            "p_ens": round(p_ens, 3),
+            "w_long": round(w_long, 3),
+            "w_short": round(w_short, 3),
+            "margin": round(margin, 3),
+        }
+        if abstain_reason_pm:
+            vote_detail["reason"] = abstain_reason_pm
+        logger.debug(
+            "[COMBINE:PM] side=%s p_ens=%.3f w_long=%.3f w_short=%.3f margin=%.3f thr=%.2f conf_floor=%.2f reason=%s",
+            side_pm, p_ens, w_long, w_short, margin, vote_threshold, confidence_floor, vote_detail.get("reason", "")
+        )
+    else:
+        # Legacy output exactly like before (with your Sprint-8 abstains still applied above)
+        decision_dir = decision_dir_legacy
+        agree_count = agree_count_legacy
+        # your previous confidence: magnitude of winner’s weight, clipped [0,1]
+        confidence = min(1.0, abs(w_max))
+        vote_detail = {
+            "weighted_sum": round(normalized_sum, 3),
+            "agree": agree_count,
+            "total": len(subsignals),
+            "profile": profile,
+        }
+        # try to reflect PM abstain reason if legacy decided a side but PM would abstain
+        # (optional, but helpful for debugging)
+        if decision_dir == "FLAT" and abstain_reason_pm:
+            vote_detail["reason"] = abstain_reason_pm
 
     logger.info(f"Final decision for {symbol} at {ts}: {decision_dir}, Confidence: {confidence:.2f}, Vote Detail: {vote_detail}")
     logger.debug(f"Final decision: {decision_dir}, Confidence: {confidence:.2f}, Vote Detail: {vote_detail}")
@@ -210,8 +276,8 @@ def combine_subsignals(
         profile,
         vote_detail,
         total_weight,
-        sum(weights.get(s.strategy_id, 1.0) for s in subsignals if s.direction == "LONG"),
-        sum(weights.get(s.strategy_id, 1.0) for s in subsignals if s.direction == "SHORT"),
+        sum(weights.get(s.strategy_id, 1.0) for s in subsignals if _norm_dir(getattr(s, 'direction', 'FLAT')) == "LONG"),
+        sum(weights.get(s.strategy_id, 1.0) for s in subsignals if _norm_dir(getattr(s, 'direction', 'FLAT')) == "SHORT"),
         normalized_sum,
         ensemble_settings.get("min_score", 0.1),
         ensemble_settings.get("majority_threshold", 0.51),

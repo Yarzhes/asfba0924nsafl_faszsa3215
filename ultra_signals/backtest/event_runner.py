@@ -242,14 +242,32 @@ class EventRunner:
             or 999999
         )
 
+        # ---------------- NEW (additive): optional global entry budget toggle ---------------
+        # If >0, we’ll enforce an overall entries cap; if 0/None, we DO NOT use a global cap.
+        self._global_entry_budget: int = int(portfolio_settings.get("global_entry_budget", 0) or 0)
+        # ------------------------------------------------------------------------------------
+
         self.portfolio = Portfolio(
             initial_capital=float(initial_capital),
             max_positions_total=int(max_total_positions),
             max_positions_per_symbol=int(max_positions_per_symbol),
         )
 
+        # ---------------- NEW (additive): honor default_size_pct from settings --------------
+        try:
+            dsp = exec_cfg.get("default_size_pct", None)
+            if dsp is not None:
+                dsp = float(dsp)
+                self.portfolio.default_size_pct = (dsp / 100.0) if dsp > 1.0 else dsp
+        except Exception:
+            pass
+        # ------------------------------------------------------------------------------------
+
         # NEW: per-run entry counter to enforce "total entries" budget (tests expect this)
         self.entries_count_total: int = 0
+
+        # Optional (additive) time stop bars per trade; 0/None keeps current behavior
+        self._max_bars_in_trade: int = int(exec_cfg.get("max_bars_in_trade", 0) or 0)
 
         # ---------------- NEW: trace FeatureStore id and self-heal if mismatched ----------------
         self._store_id = id(self.feature_store)
@@ -417,6 +435,14 @@ class EventRunner:
                     self._risk_levels.pop(symbol, None)
                     self.log.info(f"Closed {symbol} {side_up} at {bar_close} due to {engine_reason}.")
                     return
+
+            # ---------------- NEW (additive): optional bar-based time stop -------------------
+            if self._max_bars_in_trade and getattr(pos, "bars_held", 0) >= self._max_bars_in_trade:
+                self.portfolio.close_position(symbol, bar_close, timestamp, reason=f"TIME_STOP_{self._max_bars_in_trade}")
+                self._risk_levels.pop(symbol, None)
+                self.log.info(f"Closed {symbol} {side_up} at {bar_close} due to TIME_STOP_{self._max_bars_in_trade}.")
+                return
+            # --------------------------------------------------------------------------------
 
             # Still open: just log and return (do not try to re-enter)
             total_open = len(self.portfolio.positions)
@@ -609,19 +635,22 @@ class EventRunner:
 
         # 6) Handle entries (LONG/SHORT) with portfolio gating.
         if action in {"LONG", "SHORT"}:
-            # HARD GATE: enforce total entries budget across the run (not just concurrent)
-            max_total = int(getattr(self.portfolio, "max_positions_total", 999999))
-            if self.entries_count_total >= max_total:
-                ev = RiskEvent(
-                    ts=int(pd.Timestamp(timestamp).timestamp()),
-                    symbol=symbol,
-                    reason="MAX_POSITIONS_TOTAL",   # matches tests & reporting
-                    action="VETO",
-                    detail={"entries_count_total": self.entries_count_total, "cap": max_total},
-                )
-                self.risk_events.append(ev)
-                self.log.info(f"Trade for {symbol} at {timestamp} VETOED by portfolio gate: {ev.reason}")
-                return
+            # ----------------- MODIFIED (additive guard): global entries budget -----------------
+            # Your old HARD GATE is now only active when portfolio.global_entry_budget > 0.
+            if self._global_entry_budget:
+                max_total = int(self._global_entry_budget)
+                if self.entries_count_total >= max_total:
+                    ev = RiskEvent(
+                        ts=int(pd.Timestamp(timestamp).timestamp()),
+                        symbol=symbol,
+                        reason="GLOBAL_ENTRY_BUDGET",   # clearer reason when toggle is on
+                        action="VETO",
+                        detail={"entries_count_total": self.entries_count_total, "cap": max_total},
+                    )
+                    self.risk_events.append(ev)
+                    self.log.info(f"Trade for {symbol} at {timestamp} VETOED by global budget gate: {ev.reason}")
+                    return
+            # -----------------------------------------------------------------------------------
 
             allowed, size_scale, events = evaluate_portfolio(decision, self.portfolio, self.settings)
 

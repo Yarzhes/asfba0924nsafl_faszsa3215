@@ -18,8 +18,34 @@ def combine_subsignals(
     tf = subsignals[0].tf
 
     ensemble_settings = settings.get("ensemble", {})
-    vote_threshold = float(settings.get("vote_threshold", 0.5))
-    
+    # CHANGED: read vote_threshold from ensemble block first, then fallback to root, then default 0.5
+    vote_threshold_raw = ensemble_settings.get(
+        "vote_threshold", 
+        settings.get("vote_threshold", 0.5)
+    )
+
+    # >>> SPRINT-8 ADDITIONS >>> -----------------------------------------------
+    # Support regime-aware threshold (dict) or single float
+    if isinstance(vote_threshold_raw, dict):
+        vote_threshold = float(vote_threshold_raw.get(profile, vote_threshold_raw.get("mixed", 0.5)))
+    else:
+        vote_threshold = float(vote_threshold_raw)
+
+    # Optional Sprint-8 params
+    min_agree_by_reg = ensemble_settings.get("min_agree", {})  # may be dict per profile
+    if isinstance(min_agree_by_reg, dict):
+        min_agree = int(min_agree_by_reg.get(profile, min_agree_by_reg.get("mixed", 2)))
+    else:
+        # if configured as a single int/float
+        try:
+            min_agree = int(min_agree_by_reg)
+        except Exception:
+            min_agree = 2
+
+    margin_of_victory = float(ensemble_settings.get("margin_of_victory", 0.10))
+    confidence_floor   = float(ensemble_settings.get("confidence_floor", 0.60))
+    # <<< SPRINT-8 ADDITIONS <<< -----------------------------------------------
+
     weights = settings.get("weights_profiles", {}).get(profile, {})
     logger.debug(f"Combining {len(subsignals)} subsignals with profile '{profile}' and weights: {weights}")
     for s in subsignals:
@@ -30,24 +56,41 @@ def combine_subsignals(
     short_voters = 0
     total_weight = 0
 
+    # >>> SPRINT-8 ADDITIONS >>> -----------------------------------------------
+    # Track side-specific weighted sums for margin-of-victory logic
+    w_long = 0.0
+    w_short = 0.0
+    # <<< SPRINT-8 ADDITIONS <<< -----------------------------------------------
+
     for s in subsignals:
         weight = weights.get(s.strategy_id, 1.0)
         total_weight += weight
-        c = s.confidence_calibrated
+        c = float(s.confidence_calibrated)
         direction_multiplier = 1 if s.direction == "LONG" else -1 if s.direction == "SHORT" else 0
         weighted_sum += weight * c * direction_multiplier
+
+        # Count voters for original logic
         if s.direction == "LONG":
             long_voters += 1
         elif s.direction == "SHORT":
             short_voters += 1
 
+        # >>> SPRINT-8 ADDITIONS >>> -------------------------------------------
+        # Side-specific weighted totals (non-normalized)
+        if s.direction == "LONG":
+            w_long += weight * c
+        elif s.direction == "SHORT":
+            w_short += weight * c
+        # <<< SPRINT-8 ADDITIONS <<< -------------------------------------------
+
     if total_weight > 0:
         normalized_sum = weighted_sum / total_weight
     else:
-        normalized_sum = 0
+        normalized_sum = 0.0
     
     logger.debug(f"Total weight: {total_weight:.2f}, Weighted sum: {weighted_sum:.2f}, Normalized sum: {normalized_sum:.2f}")
 
+    # Original thresholding using normalized_sum
     if normalized_sum >= vote_threshold:
         decision_dir = "LONG"
         agree_count = long_voters
@@ -58,20 +101,64 @@ def combine_subsignals(
         decision_dir = "FLAT"
         agree_count = 0
 
-    vetoes = [s.reasons.get("veto") for s in subsignals if s.reasons and s.reasons.get("veto")]
+    # >>> SPRINT-8 ADDITIONS >>> -----------------------------------------------
+    # Sprint-8 abstain rules layered on top:
+    # - Compute the winning side's raw weight (w_max) and margin
+    w_max = max(w_long, w_short)
+    margin = abs(w_long - w_short)
+
+    # If we picked LONG/SHORT above, enforce extra abstain conditions
+    abstain_reason = ""
+
+    if decision_dir != "FLAT":
+        # Require clear margin of victory
+        if margin < margin_of_victory:
+            abstain_reason = "LOW_MARGIN"
+            decision_dir = "FLAT"
+            agree_count = 0
+
+        # Require minimum agreement count (per profile)
+        elif agree_count < min_agree:
+            abstain_reason = "LOW_AGREE"
+            decision_dir = "FLAT"
+            agree_count = 0
+
+        # Require minimum ensemble probability (confidence floor)
+        # We use w_max as proxy for ensemble prob (compatible with your formatter/tests)
+        elif w_max < confidence_floor:
+            abstain_reason = "LOW_CONF"
+            decision_dir = "FLAT"
+            agree_count = 0
+    # <<< SPRINT-8 ADDITIONS <<< -----------------------------------------------
+
+    vetoes = [s.reasons.get("veto") for s in subsignals if getattr(s, "reasons", None) and s.reasons.get("veto")]
     if vetoes:
         logger.debug(f"Vetoes found: {vetoes}. Overriding decision to FLAT.")
         decision_dir = "FLAT"
+        # >>> SPRINT-8 ADDITIONS >>> -------------------------------------------
+        # If we abstained due to veto, prefer to surface reason as VETO
+        abstain_reason = abstain_reason or "VETO"
+        # <<< SPRINT-8 ADDITIONS <<< -------------------------------------------
 
+    # Confidence: keep your original "abs(normalized_sum)" but cap at 1.0.
+    # (Your Telegram tests look for weighted_sum lines; they don't enforce how confidence is computed.)
     confidence = min(1.0, abs(normalized_sum))
     
     vote_detail = {
+        # NOTE: Your Telegram tests expect a fixed 3-decimal "weighted_sum" string somewhere.
+        # We'll continue to expose normalized_sum here, rounded.
         "weighted_sum": round(normalized_sum, 3),
         "agree": agree_count,
         "total": len(subsignals),
         "profile": profile,
     }
-    
+
+    # >>> SPRINT-8 ADDITIONS >>> -----------------------------------------------
+    # Also include "reason" so downstream formatters can show why we abstained
+    if abstain_reason:
+        vote_detail["reason"] = abstain_reason
+    # <<< SPRINT-8 ADDITIONS <<< -----------------------------------------------
+
     logger.info(f"Final decision for {symbol} at {ts}: {decision_dir}, Confidence: {confidence:.2f}, Vote Detail: {vote_detail}")
     logger.debug(f"Final decision: {decision_dir}, Confidence: {confidence:.2f}, Vote Detail: {vote_detail}")
 

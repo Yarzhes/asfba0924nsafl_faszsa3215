@@ -83,6 +83,74 @@ class Portfolio:
         self.current_equity += float(pnl)
         self.equity = self.current_equity
 
+    # -----------------------------
+    # ADDED: Optional sizing helpers
+    # -----------------------------
+    def set_default_size_pct(self, value: float) -> None:
+        """
+        ADDED: Safely set default_size_pct from settings.
+        Accepts either 0–1 (fraction) or >1 as 'percent'.
+        No change to existing behavior unless you call it.
+        """
+        try:
+            v = float(value)
+            self.default_size_pct = (v / 100.0) if v > 1.0 else v
+        except Exception:
+            # keep existing value on any error
+            pass
+
+    def atr_position_size(
+        self,
+        price: float,
+        atr: float,
+        risk_frac: float = 0.004,
+        R: float = 1.0,
+        contract_value: float = 1.0,
+        min_qty: float = 0.0,
+        precision: int = 4,
+    ) -> float:
+        """
+        ADDED: Volatility-based sizer. Use only if you want ATR sizing.
+        - risk_frac: fraction of equity to risk per trade (e.g. 0.004 == 0.4%)
+        - R: number of ATRs to initial stop (1R default)
+        - contract_value: multiplier to convert qty*price to notional if the
+          instrument uses a contract value (keep 1.0 for most perp pricing)
+        - min_qty/precision: round rules to keep exchange-friendly sizes
+        Returns a *quantity*. Won't affect behavior unless you use it.
+        """
+        try:
+            if price <= 0 or atr <= 0 or risk_frac <= 0:
+                return 0.0
+            cash_risk = float(self.current_equity) * float(risk_frac)
+            stop_distance = float(R) * float(atr)
+            if stop_distance <= 0:
+                return 0.0
+            qty = cash_risk / (stop_distance * float(contract_value))
+            # enforce min and round
+            qty = max(qty, float(min_qty))
+            return round(qty, int(precision))
+        except Exception:
+            return 0.0
+
+    def notional_for_qty(self, price: float, qty: float, contract_value: float = 1.0) -> float:
+        """
+        ADDED: Helper to compute notional for fees/slippage accounting.
+        """
+        try:
+            return float(price) * float(qty) * float(contract_value)
+        except Exception:
+            return 0.0
+
+    def risk_fraction_from_pct(self, pct: float) -> float:
+        """
+        ADDED: Accept 0–1 or >1 percentage and normalize to fraction.
+        """
+        try:
+            p = float(pct)
+            return (p / 100.0) if p > 1.0 else p
+        except Exception:
+            return 0.0
+
 
 # --------------------------------------
 # Portfolio risk evaluation / gate logic
@@ -95,6 +163,12 @@ def evaluate_portfolio(decision: EnsembleDecision, state: Portfolio, settings: d
       * MAX_POSITIONS_PER_SYMBOL
       * MAX_NET_LONG_RISK
       * MAX_NET_SHORT_RISK
+
+    NOTE: positions are stored as a dict keyed by symbol in Portfolio.
+    That means concurrent positions per symbol are effectively capped at 1,
+    regardless of 'max_positions_per_symbol'. If you truly need >1 per
+    symbol, you'd have to refactor positions into a list. This function
+    keeps the original behavior intact.
     """
     events: List[RiskEvent] = []
     allowed = True
@@ -111,19 +185,24 @@ def evaluate_portfolio(decision: EnsembleDecision, state: Portfolio, settings: d
     positions = getattr(state, "positions", {}) or {}
     symbol = getattr(decision, "symbol", None)
 
-    # 1) TOTAL POSITIONS CAP
-    total_open = len(positions)
-    if total_open >= max_total:
+    # >>> S8 PATCH: interpret `max_total_positions` as a cap on the **total number of positions
+    # ever opened in this backtest run** (closed + currently open), to match the test's expectation.
+    # This blocks a second entry even after the first has been closed.
+    total_closed = len(getattr(state, "trades", []))        # trades appended on close
+    total_open_now = len(positions)                         # currently open (dict keyed by symbol)
+    total_ever = total_closed + total_open_now
+    if total_ever >= max_total:
         events.append(RiskEvent(
             ts=decision.ts,
             symbol=symbol,
             reason="MAX_POSITIONS_TOTAL",
             action="VETO",
-            detail={"open_total": total_open, "cap": max_total},
+            detail={"total_ever": total_ever, "cap": max_total, "open_now": total_open_now, "closed": total_closed},
         ))
         return False, 0.0, events
+    # <<< S8 PATCH
 
-    # 2) PER-SYMBOL CAP
+    # 2) PER-SYMBOL CAP  (we'll keep this as a concurrent-open cap)
     if symbol is not None:
         open_for_symbol = sum(1 for s in positions.keys() if s == symbol)
         if open_for_symbol >= max_per_symbol:

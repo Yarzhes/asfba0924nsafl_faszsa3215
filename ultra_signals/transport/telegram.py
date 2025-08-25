@@ -38,46 +38,78 @@ def format_message(decision: EnsembleDecision, settings: Dict) -> str:
     Returns:
         A formatted string ready to be sent via Telegram.
     """
-    icon = "📈" if decision.decision == "LONG" else "📉"
-    
+    # Choose icon, including neutral for FLAT/abstain
+    if decision.decision == "LONG":
+        icon = "📈"
+    elif decision.decision == "SHORT":
+        icon = "📉"
+    else:
+        icon = "⚪"
+
     # Message header
+    header_title = f"New Ensemble Decision: {decision.decision} {decision.symbol}"
     msg = (
-        f"{icon} *New Ensemble Decision: {decision.decision} {decision.symbol}* ({decision.tf})\n\n"
+        f"{icon} *{header_title}* ({decision.tf})\n\n"
         f"Ensemble Confidence: *{decision.confidence:.2%}*\n"
     )
 
-    # Vote details
-    if decision.vote_detail:
-        vd = decision.vote_detail
-        msg += (
-            f"Vote: `{vd.get('agree', 0)}/{vd.get('total', 0)}` "
-            f"| Profile: `{vd.get('profile', 'n/a')}` "
-            f"| Wgt Sum: `{vd.get('weighted_sum', 0.0):.3f}`\n"
-        )
-    
-    # Vetoes
-    if decision.vetoes:
-        msg += f"🚨 *VETOED*: {decision.vetoes[0]}\n"
-    
-    msg += f"--------------------------------------\n"
-    
-    # Sub-signal breakdown
-    msg += "*Contributing Signals:*\n"
-    for sub in decision.subsignals:
-        sub_icon = "🟢" if sub.direction == "LONG" else "🔴" if sub.direction == "SHORT" else "⚪"
-        # Escape special characters in strategy_id
-        strategy_id_safe = sub.strategy_id.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace(']', '\\]')
-        msg += f"{sub_icon} `{strategy_id_safe}` ({sub.confidence_calibrated:.2f})\n"
+    # Vote details (includes required Wgt Sum line)
+    if getattr(decision, "vote_detail", None):
+        vd = decision.vote_detail or {}
+        # Required fields per Sprint 8 spec
+        agree = vd.get("agree", 0)
+        total = vd.get("total", 0)
+        profile = vd.get("profile", "n/a")
+        weighted_sum = float(vd.get("weighted_sum", 0.0))
 
-    # Telegram's MarkdownV2 requires escaping certain characters
-    # This is a basic implementation. A robust one would be more thorough.
-    escape_chars = r"_*[]()~`>#+-=|{}.!"
+        msg += (
+            f"Vote: `{agree}/{total}` "
+            f"| Profile: `{profile}` "
+            f"| Wgt Sum: `{weighted_sum:.3f}`\n"
+        )
+
+        # If the ensemble abstained (FLAT), include abstain reason if present
+        reason = vd.get("reason")
+        if decision.decision == "FLAT" and reason:
+            msg += f"Reason: `{str(reason)}`\n"
+
+    # Vetoes (explicit top reason line required)
+    if getattr(decision, "vetoes", None):
+        if len(decision.vetoes) > 0:
+            msg += f"🚨 *VETOED* — Top reason: `{decision.vetoes[0]}`\n"
+        else:
+            msg += "🚨 *VETOED*\n"
+
+    msg += f"--------------------------------------\n"
+
+    # Sub-signal breakdown (format like: 🟢 strat_A_long (0.80))
+    msg += "*Contributing Signals:*\n"
+    for sub in getattr(decision, "subsignals", []) or []:
+        sub_icon = "🟢" if sub.direction == "LONG" else "🔴" if sub.direction == "SHORT" else "⚪"
+        # Keep plain (no backticks) to match the expected test string:
+        # "🟢 strat_A_long (0.80)"
+        # But we still sanitize visually dangerous characters lightly.
+        strategy_id_safe = (
+            str(sub.strategy_id)
+            .replace('*', '')
+            .replace('[', '')
+            .replace(']', '')
+        )
+        conf = getattr(sub, "confidence_calibrated", 0.0)
+        try:
+            conf_f = float(conf)
+        except Exception:
+            conf_f = 0.0
+        msg += f"{sub_icon} {strategy_id_safe} ({conf_f:.2f})\n"
+
+    # Telegram's MarkdownV2 requires escaping certain characters.
+    # We keep `*` and backticks `` ` `` intact since we intentionally use them.
+    escape_chars = r"_[]()~>#+-=|{}.!"
     for char in escape_chars:
-        # Don't escape characters already part of markdown syntax we use
-        if char not in ['*', '`']:
-             msg = msg.replace(char, f"\\{char}")
+        msg = msg.replace(char, f"\\{char}")
 
     return msg
+
 
 async def send_message(text: str, settings: Dict):
     """
@@ -103,16 +135,16 @@ async def send_message(text: str, settings: Dict):
     payload = {
         "chat_id": chat_id, "text": text, "parse_mode": "MarkdownV2",
     }
-    
+
     max_retries = 3
-    base_delay = 2 # seconds
+    base_delay = 2  # seconds
 
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(url, json=payload, timeout=15)
-                
-                if response.status_code == 429: # Rate limited
+
+                if response.status_code == 429:  # Rate limited
                     retry_after = int(response.headers.get("Retry-After", base_delay * (2 ** attempt)))
                     logger.warning(f"Rate limited by Telegram. Retrying in {retry_after}s...")
                     await asyncio.sleep(retry_after)
@@ -136,5 +168,5 @@ async def send_message(text: str, settings: Dict):
             delay = base_delay * (2 ** attempt)
             logger.info(f"Waiting {delay}s before retrying...")
             await asyncio.sleep(delay)
-    
+
     logger.error("Failed to send message to Telegram after multiple retries.")

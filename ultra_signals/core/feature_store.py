@@ -518,6 +518,153 @@ class FeatureStore:
         feats = self.get_latest_features(symbol, timeframe)
         return feats.get("cvd") if feats else None
 
+    # =======================  SPRINT 9 ADDITIONS  =======================
+    # (No removals from your original code. Everything below is additive.)
+
+    # --- Simple scratchpad for auxiliary values (optional use by filters)
+    def set_aux(self, symbol: str, key: str, value: Any) -> None:
+        self._aux = getattr(self, "_aux", {})
+        self._aux.setdefault(symbol, {})[key] = value
+
+    def get_aux(self, symbol: str, key: str, default: Any = None) -> Any:
+        return getattr(self, "_aux", {}).get(symbol, {}).get(key, default)
+
+    # --- Latest timestamp (ms) for a symbol/timeframe (used by news/funding veto)
+    def current_ts_ms(self, symbol: str, timeframe: str) -> Optional[int]:
+        df = self.get_ohlcv(symbol, timeframe)
+        if df is None or df.empty:
+            return None
+        try:
+            return int(pd.Timestamp(df.index[-1]).value // 1_000_000)  # ns → ms
+        except Exception:
+            return None
+
+    # --- Return recent OHLCV rows as list of dicts (for CVD proxy, etc.)
+    def get_recent_ohlcv(self, symbol: str, timeframe: str, bars: int = 200) -> List[dict]:
+        out: List[dict] = []
+        df = self.get_ohlcv(symbol, timeframe)
+        if df is None or df.empty:
+            return out
+        tail = df.tail(bars)
+        for idx, row in tail.iterrows():
+            out.append({
+                "ts": int(pd.Timestamp(idx).value // 1_000_000),
+                "open": float(row.get("open", np.nan)),
+                "high": float(row.get("high", np.nan)),
+                "low": float(row.get("low", np.nan)),
+                "close": float(row.get("close", np.nan)),
+                "volume": float(row.get("volume", np.nan)),
+            })
+        return out
+
+    # --- Book top in a dict form the depth/thinness check expects
+    def get_book_top(self, symbol: str) -> Optional[Dict[str, float]]:
+        """
+        Returns a dict with keys matching Sprint 9 helpers:
+          bid, ask, B (bid_qty), A (ask_qty)
+        """
+        t = self._latest_book_ticker.get(symbol)
+        if not t:
+            return None
+        return {
+            "bid": float(t.best_bid),
+            "ask": float(t.best_ask),
+            "B": float(getattr(t, "best_bid_qty", 0.0)),
+            "A": float(getattr(t, "best_ask_qty", 0.0)),
+        }
+
+    # --- Spread in basis points (bps) convenience
+    def get_spread_bps(self, symbol: str) -> Optional[float]:
+        sp = self.get_spread(symbol)
+        if not sp:
+            return None
+        bid, ask, _ = sp
+        mid = (bid + ask) / 2.0 if (bid and ask) else 0.0
+        if mid <= 0:
+            return None
+        return float((ask - bid) / mid * 10_000.0)
+
+    # --- Safe getters from cached features (if present)
+    def get_atr_percentile(self, symbol: str, timeframe: str) -> Optional[float]:
+        feats = self.get_latest_features(symbol, timeframe)
+        if not feats:
+            return None
+        vol = feats.get("volatility")
+        # Try common attribute names
+        for name in ("atr_percentile", "atr_pct", "atrp"):
+            v = getattr(vol, name, None) if vol is not None else None
+            if v is not None:
+                return float(v)
+        return None
+
+    def get_adx(self, symbol: str, timeframe: str) -> Optional[float]:
+        feats = self.get_latest_features(symbol, timeframe)
+        if not feats:
+            return None
+        tr = feats.get("trend")
+        v = getattr(tr, "adx", None) if tr is not None else None
+        return float(v) if v is not None else None
+
+    # --- Simple TR compression metric: mean((high-low)/close) over a small window
+    def get_tr_compression(self, symbol: str, timeframe: str, window: Optional[int] = None) -> Optional[float]:
+        df = self.get_ohlcv(symbol, timeframe)
+        if df is None or len(df) < 5:
+            return None
+        if window is None:
+            window = int(_safe_settings(self._settings, ("filters", "tr_compression_window"), 20))
+        tail = df.tail(max(5, window)).copy()
+        try:
+            rng = (tail["high"] - tail["low"]).astype(float)
+            comp = (rng / tail["close"].replace(0, np.nan).astype(float)).mean()
+            return float(comp) if pd.notna(comp) else None
+        except Exception:
+            return None
+
+    # --- Coarse regime helper for HTF confluence
+    def get_regime(self, symbol: str, timeframe: str) -> Optional[str]:
+        """
+        Tries to read a trend regime from cached trend features.
+        Falls back to a simple ADX + price slope heuristic.
+        Returns one of: 'trend_up', 'trend_down', 'mixed', or None.
+        """
+        feats = self.get_latest_features(symbol, timeframe)
+        if not feats:
+            return None
+        tr = feats.get("trend")
+        # Preferred: explicit regime if your TrendFeatures defines it
+        for name in ("regime", "trend_regime"):
+            reg = getattr(tr, name, None) if tr is not None else None
+            if isinstance(reg, str):
+                return reg
+
+        # Fallback heuristic
+        adx = getattr(tr, "adx", None) if tr is not None else None
+        df = self.get_ohlcv(symbol, timeframe)
+        if adx is None or df is None or len(df) < 10:
+            return None
+        closes = df["close"].astype(float).tail(20).values
+        if len(closes) < 3:
+            return "mixed"
+        # sign of simple slope
+        x = np.arange(len(closes))
+        denom = ( (x - x.mean())**2 ).sum() or 1.0
+        slope = float(((x - x.mean()) * (closes - closes.mean())).sum() / denom)
+        if adx >= 20 and slope > 0:
+            return "trend_up"
+        if adx >= 20 and slope < 0:
+            return "trend_down"
+        return "mixed"
+
+    # --- Funding provider bridge used by filters (minutes to next funding)
+    def get_minutes_to_next_funding(self, symbol: str, now_ms: Optional[int]) -> Optional[int]:
+        if not self._funding_provider or now_ms is None:
+            return None
+        try:
+            return int(self._funding_provider.minutes_to_next(symbol, now_ms))
+        except Exception:
+            # Keep FeatureStore resilient even if provider glitches
+            return None
+
 
 # --- Example Usage ---
 if __name__ == "__main__":

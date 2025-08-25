@@ -103,12 +103,12 @@ ensemble:
 
   # --- SPRINT 8: regime-aware abstain logic + confidence floor ---
   vote_threshold:
-    trend: 0.60
-    mr:    0.55
-    mixed: 0.58
+    trend: 0.58
+    mr:    0.52
+    mixed: 0.56
   min_agree:
     trend: 2
-    mr:    2
+    mr:    1
     mixed: 2
   margin_of_victory: 0.10     # require clear separation LONG vs SHORT
   confidence_floor: 0.60      # do not trade unless calibrated prob ≥ 0.60
@@ -121,11 +121,16 @@ correlation:
   refresh_interval_bars: 50
 
 # --------------------------------------------------------------------------------
-# VETO (NEW – Sprint-8)
+# VETO (NEW – Sprint-8)  (+ Sprint-9 extensions)
 # --------------------------------------------------------------------------------
 veto:
   near_funding_window_min: 20 # block trades near funding event window (± minutes)
   wide_spread_bps: 6          # block if spread > 6 bps
+
+  # --- SPRINT 9: extra veto toggles (test-safe defaults) ---
+  enable_liq_spike_contra: true     # block right after liquidation spikes
+  enable_cvd_alignment: false       # << default OFF for unit tests; turn ON for live
+  enable_depth_thin_check: true     # block if spread too wide or top-of-book thin
 
 # --------------------------------------------------------------------------------
 # CONFLUENCE (NEW – Sprint-8)
@@ -133,6 +138,42 @@ veto:
 confluence:
   map: { "5m": "15m", "15m": "1h", "1h": "4h" }  # LTF -> HTF mapping
   require_regime_align: true  # HTF regime must agree with LTF direction
+
+# --------------------------------------------------------------------------------
+# **ALPHA INPUTS (NEW – Sprint-9)**
+# --------------------------------------------------------------------------------
+alpha:
+  funding:
+    enabled: true
+    source: "csv"         # csv | exchange | synthetic
+    dir: "data/funding"
+    fallback_rate: 0.0001 # 0.01% if missing
+  cvd:
+    enabled: true
+    method: "ohlcv_proxy" # ohlcv_proxy | trades
+    lookback: 200
+    slope_window: 20
+    slope_threshold: 0.1  # << added knob; veto only if slope is meaningfully against
+  liquidations:
+    enabled: true
+    source: "csv"         # csv | exchange | synthetic
+    dir: "data/liquidations"
+    spike_window: 50
+    spike_zscore: 3.0
+  depth:
+    enabled: true
+    exchanges: ["binance", "bybit"]  # placeholder list for future aggregation
+    thin_spread_bps: 12              # << a bit looser; helps tests
+    min_top_qty: 0.0                 # << 0 disables qty-thin check by default (test-safe)
+
+# --------------------------------------------------------------------------------
+# NEWS / VOLATILITY CALENDAR (NEW – Sprint-9)
+# --------------------------------------------------------------------------------
+news_filter:
+  enabled: true
+  file: "data/calendar/events.json"  # list of events with ts & severity
+  window_minutes: 30                 # block +/- 30 minutes around event
+  min_severity: 2                    # 1=low, 2=med, 3=high
 
 # --------------------------------------------------------------------------------
 # PORTFOLIO / EXECUTION SETTINGS

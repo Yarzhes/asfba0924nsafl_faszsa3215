@@ -1,0 +1,17 @@
+[
+  {
+    "ts": 1673530200000,
+    "title": "US CPI Release",
+    "severity": 3
+  },
+  {
+    "ts": 1674759600000,
+    "title": "US GDP (Advance)",
+    "severity": 2
+  },
+  {
+    "ts": 1675191600000,
+    "title": "FOMC (Eve)",
+    "severity": 2
+  }
+]

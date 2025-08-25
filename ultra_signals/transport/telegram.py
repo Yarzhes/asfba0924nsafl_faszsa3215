@@ -17,12 +17,93 @@ Design Principles:
 """
 
 import json
-from typing import Dict
+from typing import Dict, List, Optional
 import asyncio
 import httpx
 from loguru import logger
 
 from ultra_signals.core.custom_types import EnsembleDecision
+
+
+# --- helpers -----------------------------------------------------------------
+
+def _escape_markdown_v2(text: str) -> str:
+    """
+    Escape characters required by Telegram MarkdownV2.
+    Keep '*' and '`' unescaped since we intentionally use them for emphasis/monospace.
+    """
+    escape_chars = r"_[]()~>#+-=|{}.!"
+    for ch in escape_chars:
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
+def _chunk_for_telegram(text: str, limit: int = 4096) -> List[str]:
+    """
+    Telegram messages have a 4096 char limit. Split cleanly on newlines where possible.
+    """
+    if len(text) <= limit:
+        return [text]
+    parts: List[str] = []
+    start = 0
+    while start < len(text):
+        end = min(start + limit, len(text))
+        # try to break at last newline
+        nl = text.rfind("\n", start, end)
+        if nl == -1 or nl <= start:
+            nl = end
+        parts.append(text[start:nl])
+        start = nl
+    return parts
+
+
+def _format_veto_block(decision: EnsembleDecision) -> str:
+    """
+    Shows explicit top veto reason (Sprint 8 requirement) and full list if available.
+    Sprint 9 adds new reasons like: NEWS_WINDOW, CVD_WEAK, DEPTH_THIN, LIQUIDATION_SPIKE, NEAR_FUNDING_WINDOW.
+    """
+    if not getattr(decision, "vetoes", None):
+        return ""
+    vetoes = list(decision.vetoes or [])
+    block = ""
+    if len(vetoes) > 0:
+        block += f"🚨 *VETOED* — Top reason: `{vetoes[0]}`\n"
+        if len(vetoes) > 1:
+            block += f"All reasons: `{', '.join(vetoes)}`\n"
+    else:
+        block += "🚨 *VETOED*\n"
+    return block
+
+
+def _format_filter_details(decision: EnsembleDecision) -> str:
+    """
+    Optional Sprint-9 diagnostics section if your engine attaches details like:
+    - cvd_slope
+    - spread_bps, top_qty
+    - liq_z
+    - mins_to_funding
+    """
+    det = getattr(decision, "filter_details", None) or getattr(decision, "details", None)
+    if not isinstance(det, dict) or len(det) == 0:
+        return ""
+
+    lines = []
+    # Only show if present; keep short
+    if "cvd_slope" in det:
+        lines.append(f"CVD slope: `{det.get('cvd_slope'):0.3f}`")
+    if "spread_bps" in det:
+        lines.append(f"Spread(bps): `{det.get('spread_bps'):0.2f}`")
+    if "top_qty" in det:
+        lines.append(f"Top qty: `{det.get('top_qty'):0.1f}`")
+    if "liq_z" in det:
+        lines.append(f"Liq Z: `{det.get('liq_z'):0.2f}`")
+    if "mins_to_funding" in det and det.get("mins_to_funding") is not None:
+        lines.append(f"Mins→funding: `{int(det.get('mins_to_funding'))}`")
+
+    if not lines:
+        return ""
+
+    return "*Filters:* " + " | ".join(lines) + "\n"
 
 
 def format_message(decision: EnsembleDecision, settings: Dict) -> str:
@@ -73,12 +154,11 @@ def format_message(decision: EnsembleDecision, settings: Dict) -> str:
         if decision.decision == "FLAT" and reason:
             msg += f"Reason: `{str(reason)}`\n"
 
-    # Vetoes (explicit top reason line required)
-    if getattr(decision, "vetoes", None):
-        if len(decision.vetoes) > 0:
-            msg += f"🚨 *VETOED* — Top reason: `{decision.vetoes[0]}`\n"
-        else:
-            msg += "🚨 *VETOED*\n"
+    # Vetoes (explicit top reason line required) + full list
+    msg += _format_veto_block(decision)
+
+    # Optional Sprint-9 filter diagnostics (if your engine supplies them)
+    msg += _format_filter_details(decision)
 
     msg += f"--------------------------------------\n"
 
@@ -102,11 +182,8 @@ def format_message(decision: EnsembleDecision, settings: Dict) -> str:
             conf_f = 0.0
         msg += f"{sub_icon} {strategy_id_safe} ({conf_f:.2f})\n"
 
-    # Telegram's MarkdownV2 requires escaping certain characters.
-    # We keep `*` and backticks `` ` `` intact since we intentionally use them.
-    escape_chars = r"_[]()~>#+-=|{}.!"
-    for char in escape_chars:
-        msg = msg.replace(char, f"\\{char}")
+    # Escape for Telegram MarkdownV2 (keep * and ` intact)
+    msg = _escape_markdown_v2(msg)
 
     return msg
 
@@ -119,7 +196,15 @@ async def send_message(text: str, settings: Dict):
         text: The message content (Markdown formatted).
         settings: The `transport` section of the global settings.
     """
+    # --- DRY RUN support (from your docstring) -------------------------------
+    # If settings['telegram'].dry_run is True, don't actually send—just log.
     tg_settings = settings['telegram']
+    dry_run = bool(tg_settings.get('dry_run', False))
+    if dry_run:
+        logger.info("[Telegram dry-run] Message not sent:\n" + text)
+        return
+    # ------------------------------------------------------------------------
+
     if not tg_settings['enabled']:
         logger.debug("Telegram transport is disabled in settings.")
         return
@@ -132,41 +217,59 @@ async def send_message(text: str, settings: Dict):
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id, "text": text, "parse_mode": "MarkdownV2",
-    }
+
+    # Chunk if too long
+    messages = _chunk_for_telegram(text)
 
     max_retries = 3
     base_delay = 2  # seconds
 
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=payload, timeout=15)
+    async with httpx.AsyncClient() as client:
+        for idx, chunk in enumerate(messages, start=1):
+            payload = {
+                "chat_id": chat_id,
+                "text": chunk,
+                "parse_mode": "MarkdownV2",
+            }
 
-                if response.status_code == 429:  # Rate limited
-                    retry_after = int(response.headers.get("Retry-After", base_delay * (2 ** attempt)))
-                    logger.warning(f"Rate limited by Telegram. Retrying in {retry_after}s...")
-                    await asyncio.sleep(retry_after)
-                    continue
+            for attempt in range(max_retries):
+                try:
+                    response = await client.post(url, json=payload, timeout=15)
 
-                response.raise_for_status()
-                response_data = response.json()
-                msg_id = response_data.get('result', {}).get('message_id')
-                logger.success(f"Successfully sent Telegram message {msg_id} to chat {chat_id}.")
+                    if response.status_code == 429:  # Rate limited
+                        retry_after = int(response.headers.get("Retry-After", base_delay * (2 ** attempt)))
+                        logger.warning(f"Rate limited by Telegram. Retrying in {retry_after}s...")
+                        await asyncio.sleep(retry_after)
+                        continue
+
+                    response.raise_for_status()
+                    response_data = response.json()
+                    msg_id = response_data.get('result', {}).get('message_id')
+                    logger.success(f"Successfully sent Telegram message part {idx}/{len(messages)} id={msg_id} to chat {chat_id}.")
+                    break  # next chunk
+
+                except httpx.HTTPStatusError as e:
+                    logger.error(
+                        f"Telegram API error (attempt {attempt + 1}/{max_retries}, part {idx}/{len(messages)}): "
+                        f"Status {e.response.status_code}, Response: {e.response.text[:200]}"
+                    )
+                except httpx.RequestError as e:
+                    logger.error(f"Network error sending to Telegram (attempt {attempt + 1}/{max_retries}, part {idx}/{len(messages)}): {e}")
+
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.info(f"Waiting {delay}s before retrying...")
+                    await asyncio.sleep(delay)
+            else:
+                logger.error("Failed to send message to Telegram after multiple retries.")
                 return
 
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                f"Telegram API error (attempt {attempt + 1}/{max_retries}): "
-                f"Status {e.response.status_code}, Response: {e.response.text[:200]}"
-            )
-        except httpx.RequestError as e:
-            logger.error(f"Network error sending to Telegram (attempt {attempt + 1}/{max_retries}): {e}")
 
-        if attempt < max_retries - 1:
-            delay = base_delay * (2 ** attempt)
-            logger.info(f"Waiting {delay}s before retrying...")
-            await asyncio.sleep(delay)
+# --- convenience wrapper ------------------------------------------------------
 
-    logger.error("Failed to send message to Telegram after multiple retries.")
+async def send_decision(decision: EnsembleDecision, settings: Dict):
+    """
+    Convenience wrapper: format the decision and send it (honors dry_run).
+    """
+    text = format_message(decision, settings)
+    await send_message(text, settings)

@@ -4,6 +4,41 @@ from ultra_signals.core.custom_types import SubSignal, EnsembleDecision
 
 logger = logging.getLogger(__name__)
 
+# FIX: helper to safely derive both a signed score [-1,1] and a probability [0,1]
+def _signed_and_prob_from_conf(s: SubSignal) -> (float, float):
+    """
+    Returns (signed_confidence, probability) for a subsignal.
+    - If confidence_calibrated is already 0..1, use that for prob; signed = map back to [-1,1] using direction.
+    - If confidence_calibrated looks like a signed score outside 0..1, clamp to [-1,1] and map prob = (signed+1)/2.
+    - If missing, fall back to s.score similarly; otherwise prob=0.5, signed=0.0.
+    """
+    # try calibrated first
+    raw = getattr(s, "confidence_calibrated", None)
+    if raw is None:
+        raw = getattr(s, "score", 0.0)
+
+    try:
+        val = float(raw)
+    except Exception:
+        val = 0.0
+
+    # Distinguish "prob-like" vs "signed-like"
+    if 0.0 <= val <= 1.0:
+        # treat as probability
+        prob = val
+        # derive a signed score consistent with direction
+        signed = (prob * 2.0) - 1.0
+    else:
+        # treat as signed score; clamp to [-1,1] and map to prob
+        signed = max(-1.0, min(1.0, val))
+        prob = 0.5 * (signed + 1.0)
+
+    # final clamps
+    prob = max(0.0, min(1.0, prob))
+    signed = max(-1.0, min(1.0, signed))
+    return signed, prob
+
+
 def combine_subsignals(
     subsignals: List[SubSignal], profile: str, settings: Dict
 ) -> EnsembleDecision:
@@ -64,10 +99,17 @@ def combine_subsignals(
 
     for s in subsignals:
         weight = weights.get(s.strategy_id, 1.0)
+        # FIX: prevent negative weights from breaking sums
+        if weight < 0:
+            weight = 0.0
         total_weight += weight
-        c = float(s.confidence_calibrated)
+
+        # FIX: use normalized pair (signed, prob)
+        signed_c, prob_c = _signed_and_prob_from_conf(s)
+
         direction_multiplier = 1 if s.direction == "LONG" else -1 if s.direction == "SHORT" else 0
-        weighted_sum += weight * c * direction_multiplier
+        # keep original direction math for normalized_sum (uses signed confidence)
+        weighted_sum += weight * signed_c * direction_multiplier
 
         # Count voters for original logic
         if s.direction == "LONG":
@@ -76,11 +118,11 @@ def combine_subsignals(
             short_voters += 1
 
         # >>> SPRINT-8 ADDITIONS >>> -------------------------------------------
-        # Side-specific weighted totals (non-normalized)
+        # Side-specific weighted totals (use probability so they are non-negative)
         if s.direction == "LONG":
-            w_long += weight * c
+            w_long += weight * prob_c
         elif s.direction == "SHORT":
-            w_short += weight * c
+            w_short += weight * prob_c
         # <<< SPRINT-8 ADDITIONS <<< -------------------------------------------
 
     if total_weight > 0:
@@ -124,7 +166,7 @@ def combine_subsignals(
             agree_count = 0
 
         # Require minimum ensemble probability (confidence floor)
-        # We use w_max as proxy for ensemble prob (compatible with your formatter/tests)
+        # We use w_max (sum of weight*prob) as proxy for ensemble prob → non-negative
         elif w_max < confidence_floor:
             abstain_reason = "LOW_CONF"
             decision_dir = "FLAT"
@@ -140,13 +182,13 @@ def combine_subsignals(
         abstain_reason = abstain_reason or "VETO"
         # <<< SPRINT-8 ADDITIONS <<< -------------------------------------------
 
-    # Confidence: keep your original "abs(normalized_sum)" but cap at 1.0.
-    # (Your Telegram tests look for weighted_sum lines; they don't enforce how confidence is computed.)
-    confidence = min(1.0, abs(normalized_sum))
-    
+    # >>>>>> CHANGE APPLIED (Fix #3): confidence from |w_max|, not normalized_sum >>>>>>
+    # Confidence should reflect the magnitude of the winning side’s weight, clipped to [0, 1].
+    confidence = min(1.0, abs(w_max))
+    # <<<<<< CHANGE APPLIED <<<<<<
+
     vote_detail = {
-        # NOTE: Your Telegram tests expect a fixed 3-decimal "weighted_sum" string somewhere.
-        # We'll continue to expose normalized_sum here, rounded.
+        # NOTE: keep normalized_sum here for telemetry/UI; tests look for this number.
         "weighted_sum": round(normalized_sum, 3),
         "agree": agree_count,
         "total": len(subsignals),

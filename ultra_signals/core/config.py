@@ -259,6 +259,65 @@ class LoggingSettings(BaseModel):
     """Settings for logging configuration."""
     level: str = Field("INFO", description="The logging level, e.g., DEBUG, INFO, WARNING.")
 
+class LiveLatencyBudget(BaseModel):
+    target: int = 80
+    p99: int = 180
+
+class LiveLatencySettings(BaseModel):
+    tick_to_decision_ms: LiveLatencyBudget = LiveLatencyBudget()
+    decision_to_order_ms: LiveLatencyBudget = LiveLatencyBudget(target=70, p99=160)
+
+class LiveQueueSettings(BaseModel):
+    feed: int = 2000
+    engine: int = 256
+    orders: int = 128
+
+class LiveRetrySettings(BaseModel):
+    max_attempts: int = 4
+    base_delay_ms: int = 120
+
+class LiveOrderErrorBurst(BaseModel):
+    count: int = 6
+    window_sec: int = 120
+
+class LiveCircuitBreakers(BaseModel):
+    daily_loss_limit_pct: float = 0.06
+    max_consecutive_losses: int = 4
+    order_error_burst: LiveOrderErrorBurst = LiveOrderErrorBurst()
+    data_staleness_ms: int = 2500
+
+class LiveSettings(BaseModel):
+    enabled: bool = False
+    dry_run: bool = True
+    exchange: str = "binance_usdm"
+    symbols: List[str] | None = None
+    timeframes: List[str] | None = None
+    profiles_root: Optional[str] = None
+    hot_reload_profiles: bool = True
+    rate_limits: Dict[str, int] = Field(default_factory=lambda: {"orders_per_sec": 8, "cancels_per_sec": 8})
+    retries: LiveRetrySettings = LiveRetrySettings()
+    circuit_breakers: LiveCircuitBreakers = LiveCircuitBreakers()
+    latency: LiveLatencySettings = LiveLatencySettings()
+    queues: LiveQueueSettings = LiveQueueSettings()
+    # Simulator tuning (dry-run realism)
+    simulator: Dict[str, Any] = Field(default_factory=lambda: {
+        "partial_fill_prob": 0.2,
+        "reject_prob": 0.02,
+        "slippage_bps_min": -1.0,
+        "slippage_bps_max": 1.5,
+        "latency_jitter_ms_max": 25,
+    })
+    # Metrics / exporter settings
+    metrics: Dict[str, Any] = Field(default_factory=lambda: {
+        "exporter": "none",  # none|csv (future: prometheus)
+        "csv_path": "live_metrics.csv",
+        "interval_sec": 10,
+    })
+    # Health / heartbeat settings
+    health: Dict[str, Any] = Field(default_factory=lambda: {"heartbeat_interval_sec": 30})
+    # Control directory (drop flag files: pause.flag, resume.flag, kill.flag)
+    control: Dict[str, Any] = Field(default_factory=lambda: {"control_dir": "live_controls"})
+
 class Settings(BaseModel):
     """The root Pydantic model for the entire configuration."""
     data_sources: Dict[str, DataSourceSettings]
@@ -276,6 +335,7 @@ class Settings(BaseModel):
     sizing: SizingSettings
     funding_rate_provider: FundingProviderSettings
     transport: TransportSettings
+    live: Optional[LiveSettings] = None
     backtest: Optional[BacktestSettings] = None
     walkforward: Optional[WalkforwardSettings] = None
     calibration: Optional[CalibrationSettings] = None

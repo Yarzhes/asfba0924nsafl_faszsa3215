@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from collections import Counter  # NEW: for summarize_veto_reasons
 
-from ultra_signals.backtest.metrics import generate_equity_curve
+from ultra_signals.backtest.metrics import generate_equity_curve, compute_kpis
 
 class ReportGenerator:
     """Generates and saves backtest reports and artifacts."""
@@ -19,6 +19,7 @@ class ReportGenerator:
         equity_data: List[Dict],          # list of dicts (timestamps & equity)
         trades: pd.DataFrame,
         risk_events: Optional[List[Any]] = None,  # NEW: optional RiskEvents
+    routing_audit: Optional[pd.DataFrame] = None,  # NEW: meta-router audit rows
     ):
         """
         Generates a full backtest report, including a summary text file,
@@ -41,6 +42,11 @@ class ReportGenerator:
             if not df.empty:
                 self._save_risk_events_csv(df)
                 self._append_top_vetoes_to_summary(df)
+
+        # 5) Optional routing audit export
+        if routing_audit is not None and not routing_audit.empty:
+            self._save_routing_audit_csv(routing_audit)
+            self._append_profile_breakdown(trades, routing_audit)
 
         print(f"Report saved to {self.output_dir}")
 
@@ -77,6 +83,68 @@ class ReportGenerator:
             return
         path = self.output_dir / "trades.csv"
         trades.to_csv(path, index=False)
+
+    # ---------------- NEW: Routing audit + profile metrics ----------------
+    def _save_routing_audit_csv(self, audit: pd.DataFrame):
+        path = self.output_dir / "routing_audit.csv"
+        try:
+            audit.to_csv(path, index=False)
+        except Exception:
+            pass
+
+    def _append_profile_breakdown(self, trades: pd.DataFrame, audit: pd.DataFrame):
+        """Append per-profile trade counts & PnL aggregates to summary."""
+        if trades is None or trades.empty:
+            return
+        # Expect profile info inside trades.vote_detail (json/dict). Extract profile_id & version.
+        prof_ids = []
+        versions = []
+        if 'vote_detail' in trades.columns:
+            import json
+            for v in trades['vote_detail']:
+                pid = ver = None
+                try:
+                    d = v if isinstance(v, dict) else json.loads(v)
+                    prof = d.get('profile') or {}
+                    pid = prof.get('profile_id') or prof.get('profile_id'.upper()) or prof.get('id')
+                    ver = prof.get('version')
+                except Exception:
+                    pass
+                prof_ids.append(pid)
+                versions.append(ver)
+        trades = trades.copy()
+        if prof_ids:
+            trades['profile_id'] = prof_ids
+            trades['profile_version'] = versions
+        # Basic aggregation
+        agg = None
+        rich_rows = []
+        if 'pnl' in trades.columns and 'profile_id' in trades.columns:
+            for pid, grp in trades.groupby('profile_id'):
+                try:
+                    k = compute_kpis(grp)
+                except Exception:
+                    k = {}
+                rich_rows.append({
+                    'profile_id': pid,
+                    'trade_count': len(grp),
+                    'total_pnl': float(grp['pnl'].sum()) if 'pnl' in grp.columns else 0.0,
+                    'profit_factor': k.get('profit_factor'),
+                    'win_rate_pct': k.get('win_rate_pct'),
+                    'max_drawdown': k.get('max_drawdown'),
+                })
+            if rich_rows:
+                import pandas as _pd
+                agg = _pd.DataFrame(rich_rows)
+        path = self.output_dir / 'summary.txt'
+        if agg is not None and not agg.empty:
+            with open(path, 'a') as f:
+                f.write("\nPer-Profile Breakdown\n")
+                f.write("="*30 + "\n")
+                for _, row in agg.iterrows():
+                    f.write(
+                        f"- {row['profile_id']}: trades={row['trade_count']} pnl={row['total_pnl']:.2f} pf={row.get('profit_factor')} win%={row.get('win_rate_pct')} maxDD={row.get('max_drawdown')}\n"
+                    )
 
     # ---------------- NEW: RiskEvents helpers ----------------
 

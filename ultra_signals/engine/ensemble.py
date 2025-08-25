@@ -72,9 +72,23 @@ def combine_subsignals(
 
     # CHANGED: read vote_threshold from ensemble block first, then fallback to root, then default 0.5
     vote_threshold_raw = ensemble_settings.get(
-        "vote_threshold", 
+        "vote_threshold",
         settings.get("vote_threshold", 0.5)
     )
+
+    # Sprint 13: allow vote_threshold override via alpha_profiles weight_scale impact
+    alpha_profiles = settings.get("alpha_profiles", {})
+    prof_cfg = alpha_profiles.get(profile, {}) if isinstance(alpha_profiles, dict) else {}
+    weight_scale = float(prof_cfg.get("weight_scale", 1.0))
+    # If profile has higher weight_scale (>1), slightly lower threshold to be more aggressive
+    if weight_scale > 1.0:
+        try:
+            base_thr_val = vote_threshold_raw if isinstance(vote_threshold_raw, float) else None
+        except Exception:
+            base_thr_val = None
+        # Apply only when scalar (dict handled below)
+        if base_thr_val is not None:
+            vote_threshold_raw = max(0.0, base_thr_val * (1.0 - min(0.15, (weight_scale - 1.0) * 0.1)))
 
     # >>> SPRINT-8 ADDITIONS >>> -----------------------------------------------
     # Support regime-aware threshold (dict) or single float
@@ -100,6 +114,12 @@ def combine_subsignals(
 
     # NOTE: weights_profiles is your original key; keep it for backward-compat
     weights = settings.get("weights_profiles", {}).get(profile, {})
+    # Sprint 11: allow flow metric specific weights to map into subsignals whose strategy_id matches
+    flow_w_keys = ["cvd", "oi_rate", "liquidation_pulse", "depth_imbalance"]
+    for k in flow_w_keys:
+        if k not in weights:
+            # default implicit weight kept at 1.0 later; we don't inject here
+            continue
     logger.debug(f"Combining {len(subsignals)} subsignals with profile '{profile}' and weights: {weights}")
     for s in subsignals:
         logger.debug(f"  Subsignal: {s.strategy_id}, Direction: {s.direction}, Confidence: {s.confidence_calibrated}")
@@ -246,6 +266,19 @@ def combine_subsignals(
         }
         if abstain_reason_pm:
             vote_detail["reason"] = abstain_reason_pm
+        # NEW: honor legacy vote_threshold using normalized_sum even in prob-mass mode AFTER building vote_detail
+        if decision_dir == "LONG" and normalized_sum < vote_threshold:
+            decision_dir = "FLAT"
+            agree_count = 0
+            confidence = 0.0
+            vote_detail["reason"] = vote_detail.get("reason", "THR")
+        elif decision_dir == "SHORT" and normalized_sum > -vote_threshold:
+            decision_dir = "FLAT"
+            agree_count = 0
+            confidence = 0.0
+            vote_detail["reason"] = vote_detail.get("reason", "THR")
+        # Sprint 14: placeholder hook for orderflow weighting (final modulation happens in real_engine currently)
+        # Could multiply confidence here in future if orderflow summary passed in subsignals.
         logger.debug(
             "[COMBINE:PM] side=%s p_ens=%.3f w_long=%.3f w_short=%.3f margin=%.3f thr=%.2f conf_floor=%.2f reason=%s",
             side_pm, p_ens, w_long, w_short, margin, vote_threshold, confidence_floor, vote_detail.get("reason", "")

@@ -1,0 +1,4 @@
+events:
+  - time: '2025-08-25T23:13:00+00:00'
+    title: 'CPI Release'
+    impact: 'HIGH'

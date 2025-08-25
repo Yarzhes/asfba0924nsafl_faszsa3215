@@ -1,0 +1,25 @@
+meta:
+  profile_id: "BTCUSDT_5m"
+  version: "s19_2025-08-26"
+  source: "auto-calibration"
+  data_commit: "unknown"
+
+ensemble:
+  vote_threshold:
+    trend: 0.58
+  confidence_floor: 0.64
+
+playbooks:
+  trend:
+    breakout:
+      entry:
+        min_adx: 24
+        ema_sep_atr_min: 0.32
+      exit:
+        stop_atr_mult: 1.35
+        tp_atr_mults: [1.9, 2.6, 3.4]
+      risk:
+        rr_min: 1.45
+
+quality_gates:
+  qscore_bins: { Aplus: 0.86, A: 0.76, B: 0.66, C: 0.56 }

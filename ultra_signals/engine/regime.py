@@ -1,28 +1,49 @@
-from typing import Dict
-from ultra_signals.core.custom_types import FeatureVector
+from typing import Dict, Optional
+from ultra_signals.core.custom_types import FeatureVector, RegimeFeatures
+from ultra_signals.features.regime import classify_regime_full, RegimeStateMachine
+
+_STATE = RegimeStateMachine()
+
+class RegimeDetector:
+    def __init__(self, settings: Dict):
+        self.settings = settings
+
+    def detect(self, fv: FeatureVector, *, spread_bps: Optional[float], volume_z: Optional[float]) -> RegimeFeatures:
+        trend = fv.trend
+        vol = fv.volatility
+        volume_flow = fv.volume_flow
+        adx = getattr(trend, "adx", None) if trend else None
+        atr_pct = getattr(vol, "atr_percentile", None) if vol else None
+        ema_sep_atr = None
+        try:
+            if trend and vol and getattr(vol, "atr", None):
+                es = getattr(trend, "ema_short", None)
+                el = getattr(trend, "ema_long", None)
+                atr = getattr(vol, "atr", None)
+                if all(v is not None for v in [es, el, atr]) and atr:
+                    ema_sep_atr = abs(es - el) / atr
+        except Exception:
+            pass
+        bb_width_pct_atr = None
+        volume_z = getattr(volume_flow, "volume_z_score", None) if volume_flow else volume_z
+        rf = classify_regime_full(
+            adx,
+            atr_pct,
+            ema_sep_atr,
+            self.settings,
+            _STATE,
+            bb_width_pct_atr=bb_width_pct_atr,
+            volume_z=volume_z,
+            spread_bps=spread_bps,
+        )
+        fv.regime = rf
+        return rf
+
+_detector: Optional[RegimeDetector] = None
 
 def detect_regime(feature_vector: FeatureVector, settings: Dict) -> str:
-    """
-    Determines the market regime based on feature values.
-    
-    This is a simplified example. A real implementation would be more complex.
-    """
-    # Default to "chop" if not enough data
-    if not all([
-        feature_vector.trend,
-        feature_vector.trend.adx,
-        feature_vector.volatility,
-        feature_vector.volatility.atr_percentile
-    ]):
-        return "chop"
-
-    adx = feature_vector.trend.adx
-    atr_percentile = feature_vector.volatility.atr_percentile
-
-    # Simple rule-based regime detection
-    if adx > settings.get("adx_min_trend", 25) and atr_percentile > 0.6:
-        return "trend"
-    elif atr_percentile < 0.4:
-        return "mean_revert"
-    else:
-        return "chop"
+    global _detector
+    if _detector is None:
+        _detector = RegimeDetector(settings)
+    rf = _detector.detect(feature_vector, spread_bps=None, volume_z=None)
+    return rf.profile.value

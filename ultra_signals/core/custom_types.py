@@ -76,12 +76,26 @@ class VolatilityBucket(str, Enum):
 class RegimeMode(str, Enum):
     TREND = "trend"
     MEAN_REVERT = "mean_revert"
+    CHOP = "chop"
 
 
 class RegimeProfile(str, Enum):
     TREND = "trend"
     MEAN_REVERT = "mean_revert"
     CHOP = "chop"
+
+class VolState(str, Enum):
+    CRUSH = "crush"      # very low realized / implied volatility
+    NORMAL = "normal"
+    EXPANSION = "expansion"  # volatility expanding / elevated
+
+class NewsState(str, Enum):
+    QUIET = "quiet"
+    NEWS = "news"
+
+class LiquidityState(str, Enum):
+    OK = "ok"
+    THIN = "thin"
 
 
 class RegimeFeatures(BaseModel):
@@ -91,6 +105,15 @@ class RegimeFeatures(BaseModel):
     vol_bucket: VolatilityBucket = VolatilityBucket.MEDIUM
     mode: RegimeMode = RegimeMode.TREND
     profile: RegimeProfile = RegimeProfile.TREND
+    atr_percentile: Optional[float] = None  # keep raw value for downstream sizing
+    vol_state: VolState = VolState.NORMAL
+    news_state: NewsState = NewsState.QUIET
+    gates: Dict[str, bool] = {}
+    # Sprint 10 additions
+    liquidity: LiquidityState = LiquidityState.OK
+    confidence: float = 0.0
+    since_ts: Optional[int] = None
+    last_flip_ts: Optional[int] = None
 
 
 class TrendFeatures(BaseModel):
@@ -120,6 +143,85 @@ class VolumeFlowFeatures(BaseModel):
     volume_z_score: Optional[float] = None
 
 
+class FlowMetricsFeatures(BaseModel):
+    """Sprint 11 advanced order-flow & microstructure metrics.
+
+    All fields are optional so downstream code remains resilient when a metric
+    cannot be computed for the current bar (e.g. missing trades / depth).
+    """
+    # Core order-flow / aggressor tracking
+    cvd: Optional[float] = None           # cumulative volume delta (rolling)
+    cvd_chg: Optional[float] = None       # delta change this bar (buy_vol - sell_vol)
+    buy_volume: Optional[float] = None
+    sell_volume: Optional[float] = None
+
+    # Order flow imbalance (top of book or synthetic)
+    ofi: Optional[float] = None           # (bid_size - ask_size)/(bid_size+ask_size)
+
+    # Open interest dynamics
+    oi: Optional[float] = None            # latest OI level if available
+    oi_prev: Optional[float] = None
+    oi_rate: Optional[float] = None       # (oi - oi_prev)/oi_prev
+
+    # Liquidation pulse
+    liq_events: Optional[int] = None      # number of liquidations inside window
+    liq_notional_sum: Optional[float] = None
+    liq_cluster: Optional[int] = None     # 1 if cluster detected else 0
+    liq_cluster_side: Optional[str] = None  # 'BUY' or 'SELL' dominant side
+
+    # Depth imbalance (single or cross venue placeholder)
+    depth_imbalance: Optional[float] = None  # (bid_qty - ask_qty)/(bid_qty+ask_qty)
+
+    # Cross-exchange spread (bps) & deviation flag
+    spread_bps: Optional[float] = None
+    spread_dev_flag: Optional[int] = None
+
+    # Volume anomaly (Z-score) reused / enhanced
+    volume_z: Optional[float] = None
+    volume_anom: Optional[int] = None     # 1 if |z| >= configured threshold
+
+    # Timestamp (epoch ms) when last liquidation cluster detected
+    last_liq_cluster_ts: Optional[int] = None
+
+    # Internal debug dictionary (kept light)
+    meta: Optional[Dict[str, float]] = None
+
+
+class AlphaV2Features(BaseModel):
+    """Sprint 11 Feature Pack v2 composite features."""
+    # Multi-timeframe / structure
+    hh_break_20: Optional[int] = None  # 1 if broke 20-bar high this bar
+    ll_break_20: Optional[int] = None  # 1 if broke 20-bar low this bar
+    range_pct_20: Optional[float] = None
+
+    # Anchored VWAP (session)
+    sess_vwap: Optional[float] = None
+    sess_vwap_upper_1: Optional[float] = None
+    sess_vwap_lower_1: Optional[float] = None
+    sess_vwap_dev: Optional[float] = None
+
+    # Momentum structure
+    adx_slope_5: Optional[float] = None
+    rsi: Optional[float] = None  # duplicated convenience (latest RSI)
+    bull_div: Optional[int] = None
+    bear_div: Optional[int] = None
+
+    # Volatility / squeeze
+    bb_kc_ratio: Optional[float] = None
+    squeeze_flag: Optional[int] = None
+
+    # Volume / liquidity
+    volume_burst: Optional[int] = None
+
+    # Time / calendar
+    hour: Optional[int] = None
+    session: Optional[str] = None
+    week_of_month: Optional[int] = None
+
+    # Attribution snapshot (normalized contributions) (optional keys only)
+    attribution: Optional[Dict[str, float]] = None
+
+
 class FeatureVector(BaseModel):
     """
     A structured container holding all computed features for a single kline event.
@@ -139,6 +241,7 @@ class FeatureVector(BaseModel):
     momentum: Optional[MomentumFeatures] = None
     volatility: Optional[VolatilityFeatures] = None
     volume_flow: Optional[VolumeFlowFeatures] = None
+    alpha_v2: Optional[AlphaV2Features] = None
 
 
 class TradeSide(str, Enum):
@@ -203,6 +306,23 @@ class EnsembleDecision(BaseModel):
     subsignals: List[SubSignal]
     vote_detail: Dict
     vetoes: List[str]
+
+
+class QualityDecision(BaseModel):
+    """Sprint 18 quality gate evaluation output.
+
+    Contains binning, composite quality score and veto / soft gate outcomes that
+    upstream engine layers (sizing, execution planner, transport) can use to
+    adjust position size or abstain prior to order placement.
+    """
+    bin: str
+    qscore: float
+    blocked: bool
+    veto_reasons: List[str] = []        # hard veto short codes
+    soft_flags: List[str] = []          # soft gate codes (non-blocking)
+    requirements: Dict[str, bool] = {}  # any extra confirmation requirements
+    size_multiplier: float = 1.0
+    notes: str = ""
 
 
 class Position(BaseModel):

@@ -1,0 +1,14 @@
+meta:
+  profile_id: "ETHUSDT_1h"
+  version: "s19_2025-08-26"
+  source: "auto-calibration"
+  data_commit: "unknown"
+
+ensemble:
+  vote_threshold:
+    trend: 0.57
+    mean_revert: 0.56
+  confidence_floor: 0.62
+
+quality_gates:
+  qscore_bins: { Aplus: 0.855, A: 0.755, B: 0.655, C: 0.555 }

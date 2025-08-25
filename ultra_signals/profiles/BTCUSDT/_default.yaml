@@ -1,0 +1,10 @@
+meta:
+  profile_id: "BTCUSDT_default"
+  version: "s19_2025-08-26"
+  source: "auto-calibration"
+  data_commit: "unknown"
+
+# Provides a symbol-level baseline for BTCUSDT when a timeframe specific file is absent.
+ensemble:
+  vote_threshold:
+    trend: 0.595  # Slightly higher than 5m override (5m lowers to 0.58)

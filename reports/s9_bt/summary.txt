@@ -1,0 +1,12 @@
+Backtest Performance Summary
+==============================
+total_pnl: -22.74
+total_trades: 10
+win_rate_pct: 40.00
+avg_pnl: -2.27
+average_win: 7.22
+average_loss: -8.60
+profit_factor: 0.56
+sharpe: -4.14
+max_drawdown: -45.25
+avg_hold_bars: 23.90

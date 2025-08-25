@@ -39,6 +39,7 @@ from ultra_signals.core.custom_types import (
     MomentumFeatures,
     VolatilityFeatures,
     VolumeFlowFeatures,
+    AlphaV2Features,
 )
 from ultra_signals.features.cvd import CvdFeatures, CvdState, compute_cvd_features
 from ultra_signals.features.momentum import compute_momentum_features
@@ -50,6 +51,9 @@ from ultra_signals.features.orderbook import (
 from ultra_signals.features.trend import compute_trend_features
 from ultra_signals.features.volatility import compute_volatility_features
 from ultra_signals.features.volume_flow import compute_volume_flow_features
+from ultra_signals.features.alpha_v2 import compute_alpha_v2_features, build_alpha_v2_model
+from ultra_signals.features.flow_metrics import compute_flow_metrics
+from ultra_signals.core.custom_types import FlowMetricsFeatures
 
 
 def _safe_settings(d: dict, path: Tuple[str, ...], default: Any) -> Any:
@@ -105,6 +109,8 @@ class FeatureStore:
         self._feature_cache: Dict[str, Dict[str, Dict[pd.Timestamp, Dict[str, object]]]] = defaultdict(
             lambda: defaultdict(dict)
         )
+        # Sprint 10 regime detector placeholder
+        self._regime_detector = None
 
     # -------------------------------------------------------------------------
     # Helpers: normalize timestamps and provide robust feature lookups
@@ -425,11 +431,75 @@ class FeatureStore:
         except Exception as e:
             logger.exception("volume_flow feature error: {}", e)
 
+        # Alpha V2 (Sprint 11)
+        try:
+            alpha_feats = compute_alpha_v2_features(ohlcv, existing_features=feature_dict)
+            if alpha_feats:
+                feature_dict["alpha_v2"] = AlphaV2Features(**alpha_feats)
+        except Exception as e:
+            logger.exception("alpha_v2 feature error: {}", e)
+
+        # Flow Metrics (Sprint 11 advanced flow pack)
+        try:
+            fm_cfg = (feature_config.get("flow_metrics") or {})
+            if fm_cfg.get("enabled", True):
+                # Gather recent context
+                recent_trades = self.prune_and_get_trades(symbol, cutoff_ts=int(timestamp.value // 1_000_000) - 10*60*1000)
+                recent_liqs = self.prune_and_get_liquidations(symbol, cutoff_ts=int(timestamp.value // 1_000_000) - 10*60*1000)
+                book_top = self.get_book_top(symbol)
+                state = self._feature_states.setdefault(symbol, {}).setdefault("flow_metrics_state", {})
+                flow_raw = compute_flow_metrics(
+                    ohlcv=ohlcv,
+                    trades=recent_trades,
+                    liquidations=recent_liqs,
+                    book_top=book_top,
+                    settings=self._settings,
+                    state=state,
+                )
+                if flow_raw:
+                    feature_dict["flow_metrics"] = FlowMetricsFeatures(**flow_raw)
+        except Exception as e:
+            logger.exception("flow_metrics feature error: {}", e)
+
         self._feature_cache[symbol][timeframe][timestamp] = feature_dict
         logger.debug(
             "Computed features (store id={}) for {} {} at {}: {}",
             id(self), symbol, timeframe, timestamp, feature_dict
         )
+        # --- Sprint 10 Regime state (per-bar) ---
+        try:
+            if (self._settings.get("regime", {}) or {}).get("enabled", True):
+                from ultra_signals.engine.regime import RegimeDetector
+                if self._regime_detector is None:
+                    self._regime_detector = RegimeDetector(self._settings)
+                from ultra_signals.core.custom_types import FeatureVector
+                fv = FeatureVector(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    ohlcv={},
+                    trend=feature_dict.get("trend"),
+                    momentum=feature_dict.get("momentum"),
+                    volatility=feature_dict.get("volatility"),
+                    volume_flow=feature_dict.get("volume_flow"),
+                )
+                spread_bps = self.get_spread_bps(symbol)
+                volume_z = None
+                if feature_dict.get("volume_flow"):
+                    volume_z = getattr(feature_dict["volume_flow"], "volume_z_score", None)
+                rf = self._regime_detector.detect(fv, spread_bps=spread_bps, volume_z=volume_z)
+                feature_dict["regime"] = rf
+                cooldown = getattr(getattr(self._regime_detector, "_STATE", None), "cooldown_left", None)
+                logger.debug(
+                    "[REGIME] ts={} prim={}({:.2f}) vol={} liq={} cooldown={}",
+                    int(timestamp.value // 1_000_000),
+                    rf.profile.value,
+                    rf.confidence,
+                    rf.vol_state.value,
+                    rf.liquidity.value,
+                    cooldown,
+                )
+        except Exception as e:
+            logger.exception("Regime compute error: {}", e)
 
     # ------------------- Latest market snapshots -------------------
 
@@ -630,6 +700,15 @@ class FeatureStore:
         feats = self.get_latest_features(symbol, timeframe)
         if not feats:
             return None
+        # Prefer new Sprint 10 regime if present
+        reg_obj = feats.get("regime")
+        if reg_obj is not None:
+            try:
+                prim = getattr(reg_obj, "profile", None)
+                if prim is not None:
+                    return prim.value
+            except Exception:
+                pass
         tr = feats.get("trend")
         # Preferred: explicit regime if your TrendFeatures defines it
         for name in ("regime", "trend_regime"):
@@ -664,6 +743,12 @@ class FeatureStore:
         except Exception:
             # Keep FeatureStore resilient even if provider glitches
             return None
+
+    def get_regime_state(self, symbol: str, timeframe: str):
+        feats = self.get_latest_features(symbol, timeframe)
+        if feats and "regime" in feats:
+            return feats["regime"]
+        return None
 
 
 # --- Example Usage ---

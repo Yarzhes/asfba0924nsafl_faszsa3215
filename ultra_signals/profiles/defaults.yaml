@@ -1,0 +1,35 @@
+meta:
+  profile_id: "GLOBAL_DEFAULTS"
+  version: "s20_base"
+  source: "baseline"
+
+ensemble:
+  vote_threshold:
+    trend: 0.60
+    mean_revert: 0.58
+  confidence_floor: 0.60
+  margin_of_victory: 0.08
+  min_agree:
+    trend: 2
+    mean_revert: 2
+
+quality_gates:
+  qscore_bins: { Aplus: 0.85, A: 0.75, B: 0.65, C: 0.55 }
+  bin_actions:
+    Aplus: { size_mult: 1.30, require_extra_confirm: false }
+    A:     { size_mult: 1.15, require_extra_confirm: false }
+    B:     { size_mult: 1.00, require_extra_confirm: false }
+    C:     { size_mult: 0.75, require_extra_confirm: true }
+    D:     { size_mult: 0.00, require_extra_confirm: true }
+
+position_sizing:
+  max_risk_pct: 0.02
+  min_confidence: 0.55
+  atr_window: 14
+  liq_risk_weight: 0.6
+
+orderflow:
+  enable: true
+  cvd_weight: 0.4
+  liquidation_weight: 0.3
+  liquidity_sweep_weight: 0.3

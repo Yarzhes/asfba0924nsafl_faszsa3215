@@ -28,17 +28,25 @@ class MockArgs:
 @patch('ultra_signals.apps.backtest_cli.DataAdapter')
 @patch('ultra_signals.apps.backtest_cli.EventRunner')
 def test_handle_run_invokes_runner(mock_runner, mock_adapter, mock_load_settings):
-    """Verify that handle_run correctly initializes and invokes the EventRunner."""
+    """Verify that handle_run correctly initializes and invokes the EventRunner.
+
+    Pass the resolved settings object (mock_load_settings.return_value) instead of the loader
+    function itself, aligning with the handle_run signature (args, settings_obj).
+    """
     args = MockArgs(config='settings.yaml', start=None, end=None)
-    
+
+    # Resolved settings mock
+    settings_obj = mock_load_settings.return_value
+    # Ensure runtime symbols/timeframe attributes exist
+    settings_obj.runtime.symbols = ['BTCUSDT']
+    settings_obj.runtime.primary_timeframe = '5m'
+
     # Configure the mock EventRunner to return some trades
     mock_runner.return_value.run.return_value = ([{"pnl": 10}], [])
-    # The code checks if trades is not empty, so we need to return a list with a dictionary
-    # that has a 'pnl' key.
     mock_runner.return_value.trades = [{"pnl": 10}]
-    
-    backtest_cli.handle_run(args, mock_load_settings)
-    
+
+    backtest_cli.handle_run(args, settings_obj)
+
     mock_adapter.assert_called_once()
     mock_runner.assert_called_once()
     mock_runner.return_value.run.assert_called_once()

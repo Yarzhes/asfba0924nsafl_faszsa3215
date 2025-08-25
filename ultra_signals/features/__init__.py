@@ -19,6 +19,7 @@ from .orderbook import compute_orderbook_features
 from .derivatives import compute_derivatives_features
 from .funding import compute_funding_features
 from .cvd import compute_cvd_features
+from .alpha_v2 import compute_alpha_v2_features
 
 
 # You can define a __all__ to control what `from features import *` does,
@@ -32,4 +33,5 @@ __all__ = [
     "compute_derivatives_features",
     "compute_funding_features",
     "compute_cvd_features",
+    "compute_alpha_v2_features",
 ]

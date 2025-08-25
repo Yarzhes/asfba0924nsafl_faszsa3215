@@ -19,3 +19,4 @@ matplotlib
 pandas_ta
 pytest-cov
 pyarrow
+optuna>=3.6.0

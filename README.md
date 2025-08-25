@@ -12,7 +12,7 @@ The project emphasizes performance, modularity, and clean design, utilizing mode
 *   **Comprehensive Backtesting Suite (Sprint 6)**: A powerful command-line interface for strategy validation.
     *   **Single Run Backtester**: Test strategies over specific historical periods.
     *   **Walk-Forward Analysis**: Mitigate overfitting by simulating rolling optimization periods with data purging and embargoes.
-    *   **Confidence Calibration**: Use Isotonic Regression or Platt Scaling to align model probabilities with true event frequencies.
+    *   **Confidence & Auto-Calibration (Sprint 19)**: Isotonic / Platt probability calibration plus walk-forward Bayesian parameter optimization (Optuna) with composite objective & holdout guard.
     *   **Detailed Reporting**: Automatically generates performance reports, equity curves, and trade logs.
 *   **Flexible Configuration**: All aspects of the system are controlled via a `settings.yaml` file, with support for environment variable overrides for secrets and CI/CD integration.
 
@@ -93,7 +93,33 @@ Fit a calibration model to align prediction scores with true probabilities.
 python -m ultra_signals.apps.backtest_cli cal --config settings.yaml --method isotonic
 ```
 
-### 4. Output Artifacts
+### 4. Auto-Calibration (Sprint 19)
+
+Run Bayesian optimization over strategy knobs using walk-forward evaluation.
+
+1. Create / edit `cal_config.yaml` (see template in repo) to define search space & objective weights.
+2. Run optimization (example):
+```bash
+python -m ultra_signals.apps.backtest_cli cal \
+    --config cal_config.yaml \
+    --optimize \
+    --trials 50 \
+    --study-name demo_btc_5m \
+    --output-dir reports/cal/demo \
+    --holdout-start 2023-06-02 \
+    --holdout-end   2023-07-31
+```
+3. Inspect `reports/cal/demo/` for:
+     - `leaderboard.csv` (all trials)
+     - `best_params.yaml` (flattened tuned keys)
+     - `tuned_params.yaml` + `settings_autotuned.yaml` (full settings snapshot)
+     - `holdout_result.yaml` (PROMOTED / REJECTED)
+    - `opt_history.(png|html)` & `param_importances.(png|html)` if visualization libs available
+4. If holdout status is PROMOTED, adopt `settings_autotuned.yaml` for further backtests.
+
+Composite score balances PF, Winrate, Sharpe, Drawdown (penalized), Stability (1 - PF stdev), with penalties for insufficient trades and overfit gap.
+
+### 5. Output Artifacts
 
 All backtesting commands save their results to the `reports/` directory. This includes:
 *   `summary.txt`: Key performance metrics.
@@ -108,7 +134,7 @@ All backtesting commands save their results to the `reports/` directory. This in
 ultra-signals/
 ├── apps/               # Application entry points (realtime, backtest CLI)
 ├── backtest/           # Backtesting-specific modules (runner, metrics, etc.)
-├── calibration/        # Confidence calibration models
+├── calibration/        # Confidence + parameter auto-calibration modules (Sprint 19)
 ├── core/               # Core components (config, types, utils)
 ├── data/               # Data acquisition and providers
 ├── engine/             # Signal generation logic (scoring, risk)
@@ -120,3 +146,8 @@ ultra-signals/
 ├── settings.yaml       # Main configuration file
 └── requirements.txt    # Project dependencies
 ```
+
+---
+## Change Log (Excerpt)
+
+* Sprint 19: Added walk-forward Bayesian optimization (Optuna) CLI via `cal --optimize`, composite objective, persistence of tuned settings & holdout validation.

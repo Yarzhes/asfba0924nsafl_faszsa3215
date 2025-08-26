@@ -47,6 +47,7 @@ class Metrics:
         self.latency_decision_to_order = Histogram()
         self.queue_depths: Dict[str, int] = {}
         self.counters: Dict[str, int] = {"orders_sent": 0, "orders_errors": 0}
+        self._last_export_headers = False
 
     def inc(self, key: str, value: int = 1):
         self.counters[key] = self.counters.get(key, 0) + value
@@ -63,5 +64,48 @@ class Metrics:
             "queues": dict(self.queue_depths),
             "counters": dict(self.counters),
         }
+
+    # --- Prometheus style exposition (minimal) ---
+    def to_prometheus(self) -> str:
+        snap = self.snapshot()
+        lines = []
+        c = snap["counters"]
+        lines.append(f"orders_sent_total {c.get('orders_sent',0)}")
+        lines.append(f"orders_errors_total {c.get('orders_errors',0)}")
+        lt = snap["latency_tick_to_decision"]
+        if lt.get("count"):
+            lines.append(f"latency_tick_to_decision_ms_p50 {lt.get('p50',0):.3f}")
+            lines.append(f"latency_tick_to_decision_ms_p99 {lt.get('p99',0):.3f}")
+        ld = snap["latency_decision_to_order"]
+        if ld.get("count"):
+            lines.append(f"latency_decision_to_order_ms_p50 {ld.get('p50',0):.3f}")
+            lines.append(f"latency_decision_to_order_ms_p99 {ld.get('p99',0):.3f}")
+        for qn, depth in snap["queues"].items():
+            lines.append(f"queue_depth{{queue=\"{qn}\"}} {depth}")
+        lines.append(f"process_uptime_seconds {snap['uptime_sec']}")
+        return "\n".join(lines) + "\n"
+
+    def export_csv(self, path: str):  # pragma: no cover (simple IO)
+        snap = self.snapshot()
+        import csv, os
+        flat = {
+            "uptime_sec": snap["uptime_sec"],
+            "q_feed": snap["queues"].get("feed", 0),
+            "q_orders": snap["queues"].get("orders", 0),
+            "orders_sent": snap["counters"].get("orders_sent", 0),
+            "orders_errors": snap["counters"].get("orders_errors", 0),
+            "lat_tick_p50": snap["latency_tick_to_decision"].get("p50", 0),
+            "lat_tick_p99": snap["latency_tick_to_decision"].get("p99", 0),
+            "lat_dec_p50": snap["latency_decision_to_order"].get("p50", 0),
+            "lat_dec_p99": snap["latency_decision_to_order"].get("p99", 0),
+        }
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        write_header = not self._last_export_headers or not os.path.exists(path)
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(flat.keys()))
+            if write_header:
+                w.writeheader()
+                self._last_export_headers = True
+            w.writerow(flat)
 
 __all__ = ["Metrics"]

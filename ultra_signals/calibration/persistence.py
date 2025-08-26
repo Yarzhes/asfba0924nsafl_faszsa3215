@@ -30,7 +30,7 @@ def save_best(best: Dict[str, Any], base_settings: Dict[str, Any], out_dir: str)
     out.mkdir(parents=True, exist_ok=True)
     (out / 'best_params.yaml').write_text(yaml.safe_dump(best.get('params') or {}, sort_keys=False))
     snapshot = {
-        'generated_at': datetime.datetime.utcnow().isoformat(),
+        'generated_at': datetime.datetime.now(datetime.UTC).isoformat(),
         'fitness': best.get('fitness'),
         'metrics': best.get('metrics'),
         'params': best.get('params')

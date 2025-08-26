@@ -23,7 +23,7 @@ from loguru import logger
 _DDL = [
     "PRAGMA journal_mode=WAL;",
     "CREATE TABLE IF NOT EXISTS positions (symbol TEXT PRIMARY KEY, qty REAL, avg_px REAL, ts INTEGER)",
-    "CREATE TABLE IF NOT EXISTS orders_outbox (client_order_id TEXT PRIMARY KEY, status TEXT, exchange_order_id TEXT, last_error TEXT, retries INTEGER DEFAULT 0, ts INTEGER, filled_qty REAL)",
+    "CREATE TABLE IF NOT EXISTS orders_outbox (client_order_id TEXT PRIMARY KEY, status TEXT, exchange_order_id TEXT, last_error TEXT, retries INTEGER DEFAULT 0, ts INTEGER, filled_qty REAL, exec_price REAL)",
     "CREATE TABLE IF NOT EXISTS risk_runtime (key TEXT PRIMARY KEY, value TEXT)",
     "CREATE TABLE IF NOT EXISTS offsets (topic TEXT, symbol TEXT, timeframe TEXT, last_ts INTEGER, PRIMARY KEY(topic, symbol, timeframe))",
 ]
@@ -46,6 +46,10 @@ class StateStore:
         # Backwards-compatible migration: ensure filled_qty column exists
         try:
             cur.execute("ALTER TABLE orders_outbox ADD COLUMN filled_qty REAL")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE orders_outbox ADD COLUMN exec_price REAL")
         except Exception:
             pass
         self._conn.commit()

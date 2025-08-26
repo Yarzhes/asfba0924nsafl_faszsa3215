@@ -12,6 +12,9 @@ def parse_args():
     p.add_argument("--config", default="settings.yaml")
     p.add_argument("--dry-run", action="store_true", help="Force dry-run mode (no live orders)")
     p.add_argument("--latency-bench", type=int, default=0, help="Inject N synthetic closed klines to benchmark latency then exit")
+    p.add_argument("--pause", action="store_true", help="Start in paused state (safety kill switch)")
+    p.add_argument("--resume", action="store_true", help="Force resume (clear paused state) at startup")
+    p.add_argument("--flatten-now", action="store_true", help="Immediately emit a flatten plan (stub)")
     return p.parse_args()
 
 
@@ -19,6 +22,15 @@ async def _amain():
     args = parse_args()
     settings = load_settings(args.config)
     lr = LiveRunner(settings, dry_run=args.dry_run or getattr(settings.live, 'dry_run', True))
+    if args.pause:
+        lr.safety.kill_switch("PAUSE_FLAG")
+    if args.resume:
+        lr.safety.resume()
+    if args.flatten_now:
+        # Flatten stub: inject a FLAT plan for each symbol
+        for sym in lr.settings.runtime.symbols:
+            await lr.order_q.put({"ts": int(__import__('time').time()*1000), "symbol": sym, "side": "FLAT", "price": 0, "version":1, "_decision_monotonic": __import__('time').perf_counter()})
+
     if args.latency_bench > 0:
         # Run synthetic bench without network feeds
         from ultra_signals.core.events import KlineEvent

@@ -4,11 +4,11 @@ import pandas as pd
 from loguru import logger
 
 from ultra_signals.core.feature_store import FeatureStore
-from ultra_signals.core.custom_types import EnsembleDecision, FeatureVector, SubSignal
+from ultra_signals.core.custom_types import EnsembleDecision, FeatureVector, SubSignal, RiskEvent
 from ultra_signals.engine import ensemble, regime, scoring
 from ultra_signals.risk.position_sizing import PositionSizing
 from ultra_signals.engine.regime_router import RegimeRouter
-from ultra_signals.engine.orderflow import OrderFlowAnalyzer, OrderFlowSnapshot
+from ultra_signals.engine.orderflow import OrderFlowAnalyzer, OrderFlowSnapshot, apply_orderflow_modulation
 from ultra_signals.engine.liquidation_heatmap import LiquidationHeatmap
 from ultra_signals.engine.position_sizer import PositionSizer
 from ultra_signals.engine.execution_planner import select_playbook, build_plan
@@ -242,6 +242,7 @@ class RealSignalEngine:
             derivatives=None,
             orderbook=None,
             rs=None,
+            flow_metrics=features.get("flow_metrics")
         )
         try:
             logger.debug("FV for {} at {}:\n{}", symbol, timestamp, feature_vector.model_dump_json(indent=2))
@@ -285,11 +286,45 @@ class RealSignalEngine:
                     tf=tf,
                     strategy_id=name,
                     direction=direction,
-                    confidence_raw=abs(val),
                     confidence_calibrated=abs(val),
                     reasons={},
                 )
             )
+
+        # Sprint 11: create lightweight subsignals from flow metrics (cvd, oi_rate, liquidation pulse, depth imbalance)
+        try:
+            fm = features.get("flow_metrics") if isinstance(features, dict) else None
+            fm_weights = (self.settings.get("weights_profiles") or {}).get("flow_metrics_raw", {})  # optional bucket
+            if fm:
+                # Map metric to (value, threshold default)
+                fm_map = {
+                    "cvd": getattr(fm, "cvd_chg", None) or getattr(fm, "cvd", None),
+                    "oi_rate": getattr(fm, "oi_rate", None),
+                    "liquidation_pulse": getattr(fm, "liq_cluster", None),
+                    "depth_imbalance": getattr(fm, "depth_imbalance", None),
+                }
+                for sid, raw_val in fm_map.items():
+                    if raw_val is None:
+                        continue
+                    try:
+                        v = float(raw_val)
+                    except Exception:
+                        continue
+                    if v == 0:
+                        continue
+                    direction = "LONG" if v > 0 else "SHORT"
+                    conf = min(1.0, abs(v))
+                    subsignals.append(SubSignal(
+                        ts=ts_epoch,
+                        symbol=symbol,
+                        tf=tf,
+                        strategy_id=sid,
+                        direction=direction,
+                        confidence_calibrated=conf,
+                        reasons={"src": "flow_metrics"}
+                    ))
+        except Exception:
+            pass
 
         if not subsignals:
             dec = EnsembleDecision(
@@ -352,53 +387,8 @@ class RealSignalEngine:
         # Sprint 14: apply order flow confidence modulation post-ensemble but pre-risk sizing.
         if final_decision and of_snapshot and final_decision.decision in ("LONG", "SHORT"):
             try:
-                boost_applied = 0.0
-                of_cfg = orderflow_cfg
-                cvd_w = float(of_cfg.get("cvd_weight", 0.4))
-                liq_w = float(of_cfg.get("liquidation_weight", 0.3))
-                sweep_w = float(of_cfg.get("liquidity_sweep_weight", 0.3))
-                direction = final_decision.decision
-                modifiers = []
-                # CVD directional confirmation
-                if of_snapshot.cvd_chg is not None and of_snapshot.cvd is not None:
-                    if direction == "LONG" and of_snapshot.cvd_chg > 0:
-                        modifiers.append(cvd_w)
-                    elif direction == "SHORT" and of_snapshot.cvd_chg < 0:
-                        modifiers.append(cvd_w)
-                # Liquidation dominance contrarian reversal (if shorts liquidated heavily -> LONG opportunity)
-                if of_snapshot.liq_side_dominant:
-                    # If dominant side liquidated matches opposite of our direction we treat as favorable reversal
-                    if direction == "LONG" and of_snapshot.liq_side_dominant == "short":
-                        modifiers.append(liq_w * min(1.0, (of_snapshot.liq_impulse or 0.0) / 2.0))
-                    if direction == "SHORT" and of_snapshot.liq_side_dominant == "long":
-                        modifiers.append(liq_w * min(1.0, (of_snapshot.liq_impulse or 0.0) / 2.0))
-                # Liquidity sweep alignment
-                if of_snapshot.sweep_side:
-                    # sweep_side 'ask' implies potential short setup (price ran stops above) -> favor SHORT
-                    if direction == "SHORT" and of_snapshot.sweep_side == "ask":
-                        modifiers.append(sweep_w)
-                    elif direction == "LONG" and of_snapshot.sweep_side == "bid":
-                        modifiers.append(sweep_w)
-                    else:
-                        # conflicting sweep -> halve confidence
-                        final_decision.confidence *= 0.5
-                # Apply cumulative boost capped at +30%
-                if modifiers:
-                    boost_total = min(0.30, sum(modifiers))
-                    final_decision.confidence = min(1.0, final_decision.confidence * (1.0 + boost_total))
-                    boost_applied = boost_total
-                # Attach telemetry
-                of_detail = {
-                    "cvd": of_snapshot.cvd,
-                    "cvd_chg": of_snapshot.cvd_chg,
-                    "liq_long": of_snapshot.liq_long_notional,
-                    "liq_short": of_snapshot.liq_short_notional,
-                    "liq_dom": of_snapshot.liq_side_dominant,
-                    "liq_impulse": of_snapshot.liq_impulse,
-                    "sweep_side": of_snapshot.sweep_side,
-                    "sweep_flag": of_snapshot.sweep_flag,
-                    "boost_applied": round(boost_applied, 4)
-                }
+                new_conf, of_detail = apply_orderflow_modulation(final_decision.decision, final_decision.confidence, of_snapshot, orderflow_cfg)
+                final_decision.confidence = new_conf
                 final_decision.vote_detail.setdefault("orderflow", of_detail)
             except Exception:
                 pass
@@ -474,6 +464,8 @@ class RealSignalEngine:
                     "reason": "PLAYBOOK_ABSTAIN",
                     "selected": getattr(playbook, 'name', None)
                 })
+                # top-level reason for consistency with earlier FLAT causes
+                final_decision.vote_detail.setdefault("reason", "PLAYBOOK_ABSTAIN")
             elif plan:
                 final_decision.vote_detail.setdefault("playbook", plan)
                 # embed one-liner summary for downstream transport (telegram, etc.)
@@ -533,7 +525,7 @@ class RealSignalEngine:
                         except Exception:
                             self._news_veto = None
                     if getattr(self, "_news_veto", None):
-                        blocked, reason = self._news_veto.is_event_now(ts_epoch * 1000)
+                        blocked, reason = self._news_veto.is_event_now(symbol, ts_epoch * 1000)
                         if blocked:
                             final_decision.decision = "FLAT"
                             final_decision.vetoes.append("VETO_NEWS")
@@ -542,6 +534,18 @@ class RealSignalEngine:
                                 "news_event": reason,
                                 "embargo_min": self._news_veto.embargo_minutes,
                             })
+                            # Attach high-level reason & embed RiskEvent
+                            final_decision.vote_detail.setdefault("reason", f"VETO_NEWS:{reason}")
+                            try:
+                                final_decision.vote_detail.setdefault("risk_events", []).append(RiskEvent(
+                                    ts=ts_epoch,
+                                    symbol=symbol,
+                                    reason="NEWS_EMBARGO",
+                                    action="VETO",
+                                    detail={"event": reason}
+                                ).__dict__)
+                            except Exception:
+                                pass
                             veto_applied = True
 
                 # Volatility veto (ATR percentile, liquidation impulse, funding rate)
@@ -594,9 +598,36 @@ class RealSignalEngine:
                         reasons["liq_impulse"] = liq_impulse
                     if reasons:
                         final_decision.decision = "FLAT"
-                        final_decision.vetoes.append("VETO_VOL")
+                        # keep original code VETO_VOL for backward compatibility AND add specific spike code for ATR
+                        if "atr_percentile" in reasons:
+                            final_decision.vetoes.append("VETO_VOL_SPIKE")
+                        else:
+                            final_decision.vetoes.append("VETO_VOL")
                         final_decision.vote_detail.setdefault("veto", {})
                         final_decision.vote_detail["veto"].update(reasons)
+                        # Provide concise reason at top level
+                        if "atr_percentile" in reasons:
+                            final_decision.vote_detail.setdefault("reason", "VETO_VOL_SPIKE")
+                        elif "funding_rate" in reasons:
+                            final_decision.vote_detail.setdefault("reason", "VETO_FUNDING")
+                        elif "liq_impulse" in reasons:
+                            final_decision.vote_detail.setdefault("reason", "VETO_LIQ_CLUSTER")
+                        # RiskEvent embedding (for backtest summary extraction if desired)
+                        try:
+                            r_reason = "VOL_SPIKE" if "atr_percentile" in reasons else (
+                                "FUNDING_EXTREME" if "funding_rate" in reasons else (
+                                    "LIQ_CLUSTER" if "liq_impulse" in reasons else "VOL_VETO"
+                                )
+                            )
+                            final_decision.vote_detail.setdefault("risk_events", []).append(RiskEvent(
+                                ts=ts_epoch,
+                                symbol=symbol,
+                                reason=r_reason,
+                                action="VETO",
+                                detail=reasons
+                            ).__dict__)
+                        except Exception:
+                            pass
                         veto_applied = True
         except Exception as e:
             logger.debug("Vol/News veto integration error: {}", e)
@@ -630,6 +661,17 @@ class RealSignalEngine:
                     })
                     logger.debug("Risk Model Decision: {}", final_decision.vote_detail["risk_model"])
 
+                    # Apply playbook size_scale (Sprint17) if plan present
+                    try:
+                        plan_pb = final_decision.vote_detail.get("playbook")
+                        if isinstance(plan_pb, dict) and plan_pb.get("size_scale") and plan_pb.get("size_scale") != 1.0:
+                            ps = final_decision.vote_detail["risk_model"].get("position_size")
+                            scaled = ps * float(plan_pb["size_scale"])
+                            final_decision.vote_detail["risk_model"]["position_size_playbook"] = round(scaled, 2)
+                            final_decision.vote_detail["risk_model"]["size_scale_playbook"] = plan_pb["size_scale"]
+                    except Exception:
+                        pass
+
                 # Apply quality size multiplier (Sprint 18) if present
                 q_mult = float(final_decision.vote_detail.get("quality_size_mult", 1.0))
                 if q_mult != 1.0 and final_decision.vote_detail.get("risk_model"):
@@ -651,6 +693,32 @@ class RealSignalEngine:
                         clusters = heatmap.get_liq_levels(symbol) if lh_cfg.get("enabled", True) else []
                         current_price = float(feature_vector.ohlcv.get("close", 0.0)) if feature_vector.ohlcv else 0.0
                         liq_risk = LiquidationHeatmap.compute_liq_risk(current_price, clusters, heatmap.min_cluster_usd) if clusters else 0.0
+                        # NEW (Sprint15 enhancement): compute nearest large cluster distance (basis points)
+                        nearest_wall_bp = None
+                        if clusters and current_price > 0:
+                            import math  # lightweight
+                            best_bp = None
+                            for c in clusters:
+                                try:
+                                    if float(c.get('size', 0)) < heatmap.min_cluster_usd:
+                                        continue
+                                    dist_bp = abs(float(c.get('price')) - current_price) / current_price * 10_000
+                                    if best_bp is None or dist_bp < best_bp:
+                                        best_bp = dist_bp
+                                except Exception:
+                                    continue
+                            if best_bp is not None:
+                                nearest_wall_bp = round(best_bp, 2)
+                        # Classify liq risk for reporting (low/medium/high)
+                        def _classify_liq_risk(x: float) -> str:
+                            if x is None:
+                                return "unknown"
+                            if x < 0.5:
+                                return "low"
+                            if x < 1.2:
+                                return "medium"
+                            return "high"
+                        liq_risk_cls = _classify_liq_risk(liq_risk)
                         # compute atr (volatility) fallback
                         atr_val = 0.0
                         vol_obj = features.get("volatility")
@@ -673,6 +741,8 @@ class RealSignalEngine:
                                     "skipped": True,
                                     "reason": "HIGH_LIQ_RISK",
                                     "liq_risk": liq_risk,
+                    "liq_cluster_risk": liq_risk_cls,
+                    "nearest_wall_bp": nearest_wall_bp,
                                     "clusters": clusters
                                 })
                             else:
@@ -683,9 +753,21 @@ class RealSignalEngine:
                                     "confidence": round(conf, 4),
                                     "atr": atr_val,
                                     "liq_risk": liq_risk,
+                    "liq_cluster_risk": liq_risk_cls,
+                    "nearest_wall_bp": nearest_wall_bp,
                                     "clusters": clusters,
                                     "clipped": sz_res.clipped
                                 })
+                                # Apply playbook size scaling if present
+                                try:
+                                    plan_pb = final_decision.vote_detail.get("playbook")
+                                    if isinstance(plan_pb, dict) and plan_pb.get("size_scale") and plan_pb.get("size_scale") != 1.0:
+                                        base_sz = final_decision.vote_detail["position_sizer"]["size_quote"]
+                                        scaled = base_sz * float(plan_pb["size_scale"])
+                                        final_decision.vote_detail["position_sizer"]["size_quote_playbook"] = round(scaled, 2)
+                                        final_decision.vote_detail["position_sizer"]["size_scale_playbook"] = plan_pb["size_scale"]
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
         except Exception as e:

@@ -142,3 +142,95 @@ class OrderFlowAnalyzer:
             sweep_flag=bool(sweep.get('sweep_side')),
             meta={"imbalance": sweep.get('imbalance')}
         )
+
+
+# -----------------------------
+# Confidence Modulation Helper
+# -----------------------------
+def apply_orderflow_modulation(direction: str,
+                               confidence: float,
+                               snapshot: OrderFlowSnapshot | None,
+                               cfg: Dict[str, Any]) -> tuple[float, Dict[str, Any]]:
+    """Apply Sprint 14 orderflow confidence adjustments.
+
+    Rules (mirrors logic previously in real_engine):
+      - CVD directional confirmation adds cvd_weight
+      - Liquidation dominance contrarian reversal (dominant shorts -> LONG boost, dominant longs -> SHORT boost)
+        scaled by impulse/2 capped at liq_weight
+      - Liquidity sweep alignment adds sweep_weight
+      - Conflicting sweep halves confidence
+      - Total boost capped at +30%
+
+    Returns: (new_confidence, detail_dict)
+    """
+    if snapshot is None or direction not in ("LONG", "SHORT"):
+        return confidence, {"boost_applied": 0.0}
+    try:
+        cvd_w = float(cfg.get("cvd_weight", 0.4))
+        liq_w = float(cfg.get("liquidation_weight", 0.3))
+        sweep_w = float(cfg.get("liquidity_sweep_weight", 0.3))
+    except Exception:
+        cvd_w, liq_w, sweep_w = 0.4, 0.3, 0.3
+
+    modifiers: list[float] = []
+    new_conf = float(confidence)
+
+    # CVD confirmation
+    try:
+        if snapshot.cvd_chg is not None:
+            if direction == "LONG" and snapshot.cvd_chg > 0:
+                modifiers.append(cvd_w)
+            elif direction == "SHORT" and snapshot.cvd_chg < 0:
+                modifiers.append(cvd_w)
+    except Exception:
+        pass
+
+    # Liquidation contrarian reversal boost
+    try:
+        if snapshot.liq_side_dominant and snapshot.liq_impulse is not None:
+            if direction == "LONG" and snapshot.liq_side_dominant == "short":
+                modifiers.append(liq_w * min(1.0, snapshot.liq_impulse / 2.0))
+            elif direction == "SHORT" and snapshot.liq_side_dominant == "long":
+                modifiers.append(liq_w * min(1.0, snapshot.liq_impulse / 2.0))
+    except Exception:
+        pass
+
+    # Liquidity sweep alignment / conflict
+    sweep_conflict = False
+    try:
+        if snapshot.sweep_side:
+            if direction == "SHORT" and snapshot.sweep_side == "ask":
+                modifiers.append(sweep_w)
+            elif direction == "LONG" and snapshot.sweep_side == "bid":
+                modifiers.append(sweep_w)
+            else:
+                # conflicting sweep
+                sweep_conflict = True
+    except Exception:
+        pass
+
+    boost_applied = 0.0
+    if modifiers:
+        boost_applied = min(0.30, sum(modifiers))
+        new_conf = min(1.0, new_conf * (1.0 + boost_applied))
+
+    if sweep_conflict:
+        new_conf *= 0.5
+
+    detail = {
+        "cvd": snapshot.cvd,
+        "cvd_chg": snapshot.cvd_chg,
+        "liq_long": snapshot.liq_long_notional,
+        "liq_short": snapshot.liq_short_notional,
+        "liq_dom": snapshot.liq_side_dominant,
+        "liq_impulse": snapshot.liq_impulse,
+        "sweep_side": snapshot.sweep_side,
+        "sweep_flag": snapshot.sweep_flag,
+        "boost_applied": round(boost_applied, 4),
+        "conflict_halved": sweep_conflict
+    }
+    return new_conf, detail
+
+__all__ = [
+    'OrderFlowAnalyzer', 'OrderFlowSnapshot', 'apply_orderflow_modulation'
+]

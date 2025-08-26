@@ -40,7 +40,7 @@ def test_atr_veto_triggers():
     df = pd.DataFrame([{'open':1,'high':1,'low':1,'close':1,'volume':1}], index=[now])
     dec = eng.generate_signal(df, 'BTCUSDT')
     # If subsignals created and veto applied -> FLAT with VETO_VOL in vetoes
-    assert 'VETO_VOL' in dec.vetoes or dec.decision == 'FLAT'
+    assert any(v in dec.vetoes for v in ['VETO_VOL','VETO_VOL_SPIKE']) or dec.decision == 'FLAT'
 
 
 def test_news_veto_triggers():
@@ -59,3 +59,22 @@ def test_news_veto_triggers():
     df = pd.DataFrame([{'open':1,'high':1,'low':1,'close':1,'volume':1}], index=[now])
     dec = eng.generate_signal(df, 'BTCUSDT')
     assert 'VETO_NEWS' in dec.vetoes or dec.decision == 'FLAT'
+
+
+def test_funding_veto_triggers():
+    # Craft features with elevated funding rate
+    class Deriv:  # minimal stub
+        funding_now = 0.001  # 0.10%
+    base = _base_feats(atr_pct=0.10)
+    base['derivatives'] = Deriv()
+    settings = {
+        'runtime': {'primary_timeframe': '5m'},
+        'features': {},
+        'news_veto': {'enabled': False},
+        'volatility_veto': {'enabled': True, 'funding_rate_limit': 0.0005},
+    }
+    eng = RealSignalEngine(settings, DummyFeatureStore(base))
+    now = pd.Timestamp.utcnow().floor('T')
+    df = pd.DataFrame([{'open':1,'high':1,'low':1,'close':1,'volume':1}], index=[now])
+    dec = eng.generate_signal(df, 'BTCUSDT')
+    assert any(v in dec.vetoes for v in ['VETO_VOL','VETO_VOL_SPIKE']) or dec.decision == 'FLAT'

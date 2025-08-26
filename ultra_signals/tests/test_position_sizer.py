@@ -15,6 +15,13 @@ def test_liq_risk_reduces_size():
     assert high_risk.size_quote < low_risk.size_quote
 
 
+def test_low_confidence_smaller_size():
+    sizer = PositionSizer(account_equity=10000, max_risk_pct=0.02)
+    hi = sizer.calc_position_size(signal_conf=0.85, atr=35, liq_risk=0.3)
+    lo = sizer.calc_position_size(signal_conf=0.40, atr=35, liq_risk=0.3)
+    assert lo.size_quote < hi.size_quote
+
+
 def test_zero_atr_fallback():
     sizer = PositionSizer(account_equity=10000, max_risk_pct=0.02)
     res = sizer.calc_position_size(signal_conf=0.7, atr=0.0, liq_risk=0.0)

@@ -50,13 +50,15 @@ def format_message(decision: EnsembleDecision, opts: dict = {}) -> str:
         vetoes = q.get('vetoes') or []
         soft = q.get('soft_flags') or []
         if vetoes:
-            parts.append(f"Quality: *VETO* `{','.join([_esc_md(v) for v in vetoes])}` q={qscore:.2f}→{bin_}")
+            parts.append(f"VETO: {','.join([_esc_md(v) for v in vetoes])} | q={qscore:.2f} → {bin_}")
         else:
             mult = q.get('size_multiplier')
             if mult:
-                parts.append(f"Quality: {bin_} q={qscore:.2f} Size×{mult}")
+                gate_txt = "Gates: OK" if not soft else f"Gates: {len(soft)} soft"
+                parts.append(f"Quality: {bin_} (q={qscore:.2f}) | {gate_txt} | Size×{mult}")
             else:
-                parts.append(f"Quality: {bin_} q={qscore:.2f}")
+                gate_txt = "Gates: OK" if not soft else f"Gates: {len(soft)} soft"
+                parts.append(f"Quality: {bin_} (q={qscore:.2f}) | {gate_txt}")
         if soft:
             parts.append(f"Soft Gates: `{_esc_md(','.join(soft))}`")
 

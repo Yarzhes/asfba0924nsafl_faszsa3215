@@ -35,3 +35,18 @@ def test_mean_revert_detection_low_rsi():
     feats = {'trend': DummyTrend(adx=15), 'volatility': DummyVol(atr_percentile=40), 'momentum': DummyMom(rsi=25)}
     r = RegimeRouter.detect_regime(feats, SETTINGS)
     assert r == 'mean_revert'
+
+def test_route_alias_keys():
+    feats = {'trend': DummyTrend(adx=30), 'volatility': DummyVol(atr_percentile=40), 'momentum': DummyMom(rsi=60)}
+    out = RegimeRouter.route(feats, {
+        **SETTINGS,
+        'alpha_profiles': {
+            'trend': {'alphas': ['breakout_v2'], 'weight_scale': 1.2, 'min_confidence': 0.6}
+        }
+    })
+    # core keys
+    assert out['regime'] == 'trend'
+    # alias keys for visualization
+    assert out['detected'] == 'trend'
+    assert out['alphas_used'] == ['breakout_v2']
+    assert out['confidence_boost'] == 1.2

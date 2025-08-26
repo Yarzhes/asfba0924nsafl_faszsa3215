@@ -267,12 +267,28 @@ class QualityGates:
 
         # Correlation stack (placeholder: rely on decision.vote_detail['correlation'])
         corr_detail = (dec.vote_detail or {}).get('correlation') if isinstance(dec.vote_detail, dict) else None
-        if corr_detail and corr_detail.get('stack_block'):
-            hard.append('CORR_STACK')
+        if corr_detail:
+            # Accept several synonymous flags for flexibility
+            if corr_detail.get('stack_block') or corr_detail.get('blocked'):
+                hard.append('CORR_STACK')
+            else:
+                # Leader conflict heuristic: leader symbol (e.g. BTC) signaling opposite direction w/ high confidence
+                leader_conflict = corr_detail.get('leader_conflict') or corr_detail.get('leader_opposite_high_conf')
+                if leader_conflict:
+                    hard.append('CORR_STACK')
 
         # Daily drawdown / streak (pull from settings.brakes maybe - placeholder flags in feats)
-        if feats.get('risk', {}).get('daily_dd_violation') if isinstance(feats.get('risk'), dict) else False:
+        risk_block = feats.get('risk') if isinstance(feats.get('risk'), dict) else {}
+        if risk_block.get('daily_dd_violation'):
             hard.append('DAILY_DD')
+        # Consecutive losses guard
+        try:
+            consec = int(risk_block.get('consecutive_losses') or 0)
+            max_consec = int(veto_cfg.get('max_consecutive_losses', 999999))
+            if consec >= max_consec:
+                hard.append('DAILY_DD')  # reuse code; can differentiate later if desired
+        except Exception:
+            pass
 
         # Heatmap proximity (e.g., distance bp to large liquidation wall) from position_sizer or heatmap feature
         liqmap = (dec.vote_detail or {}).get('position_sizer', {}) if isinstance(dec.vote_detail, dict) else {}
@@ -290,6 +306,14 @@ class QualityGates:
                 max_drop = _safe_float(veto_cfg.get('max_slippage_rr_drop'), 0.2)
                 if drop is not None and drop > max_drop:
                     hard.append('SLIPPAGE_RISK')
+
+        # News window hard veto (if upstream attached news embargo detail; S16 integration)
+        try:
+            veto_detail = (dec.vote_detail or {}).get('veto') if isinstance(dec.vote_detail, dict) else None
+            if veto_detail and ('news_event' in veto_detail or veto_detail.get('news_window_active')):
+                hard.append('NEWS_WINDOW')
+        except Exception:
+            pass
 
         # ---------------- Soft Gates ----------------
         fm = feats.get('flow_metrics')
@@ -314,6 +338,39 @@ class QualityGates:
             if close_px is not None and trigger_px is not None and atr_val and atr_val > 0:
                 if abs(close_px - trigger_px) >= late_atr * atr_val:
                     soft.append('LATE_MOVE')
+        except Exception:
+            pass
+
+        # Time of day restricted window (soft gate TIME_OF_DAY)
+        try:
+            import datetime as _dt
+            # Determine bar time UTC: prefer meta timestamp (epoch seconds) else decision.ts
+            ts_sec = None
+            meta_ts = feats.get('meta', {}).get('bar_time_utc') if isinstance(feats.get('meta'), dict) else None
+            if meta_ts:
+                try:
+                    ts_sec = int(meta_ts)
+                except Exception:
+                    ts_sec = None
+            if ts_sec is None:
+                ts_sec = int(getattr(dec, 'ts', 0))
+            if ts_sec:
+                dt = _dt.datetime.utcfromtimestamp(ts_sec)
+                hhmm = f"{dt.hour:02d}:{dt.minute:02d}"
+                windows = soft_cfg.get('restricted_hours_utc') or []
+                for win in windows:
+                    try:
+                        start = win.get('start'); end = win.get('end')
+                        if start and end:
+                            if start <= end:
+                                if start <= hhmm < end:
+                                    soft.append('TIME_OF_DAY'); break
+                            else:
+                                # window wraps midnight
+                                if hhmm >= start or hhmm < end:
+                                    soft.append('TIME_OF_DAY'); break
+                    except Exception:
+                        continue
         except Exception:
             pass
 

@@ -310,8 +310,11 @@ class LiveSettings(BaseModel):
     # Metrics / exporter settings
     metrics: Dict[str, Any] = Field(default_factory=lambda: {
         "exporter": "none",  # none|csv (future: prometheus)
+    "exporter": "none",  # none|csv|http
         "csv_path": "live_metrics.csv",
         "interval_sec": 10,
+    "http_port": 8765,
+    "json_log": False,
     })
     # Health / heartbeat settings
     health: Dict[str, Any] = Field(default_factory=lambda: {"heartbeat_interval_sec": 30})

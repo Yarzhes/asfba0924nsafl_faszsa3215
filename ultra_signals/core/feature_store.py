@@ -458,6 +458,10 @@ class FeatureStore:
                 )
                 if flow_raw:
                     feature_dict["flow_metrics"] = FlowMetricsFeatures(**flow_raw)
+                    try:
+                        logger.debug("[FLOW_METRICS] {} {} ts={} -> {}", symbol, timeframe, int(timestamp.value // 1_000_000), flow_raw)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.exception("flow_metrics feature error: {}", e)
 

@@ -143,16 +143,17 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
             if getattr(args, 'routing_audit', False):
                 try:
                     mr = routed.get('meta_router', {}) or {}
+                    import time as _t
                     row = {
+                        'ts': int(_t.time()),
                         'symbol': sym,
-                        'timeframe': timeframe,
+                        'tf': timeframe,
                         'profile_id': mr.get('profile_id'),
                         'version': mr.get('version'),
-                        'min_required_version': mr.get('min_required_version'),
+                        'used_overrides': '|'.join(mr.get('resolved_keys') or []),
+                        'fall_back_chain': '>'.join(mr.get('fallback_chain') or []),
                         'missing': mr.get('missing'),
                         'stale': mr.get('stale'),
-                        'resolved_keys': ','.join(mr.get('resolved_keys') or []) if isinstance(mr.get('resolved_keys'), list) else mr.get('resolved_keys'),
-                        'fallback_chain': ' > '.join(mr.get('fallback_chain') or []) if isinstance(mr.get('fallback_chain'), list) else mr.get('fallback_chain'),
                     }
                     routing_rows.append(row)
                 except Exception:
@@ -172,13 +173,36 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
         if 'vote_detail' in trades_df.columns:
             try:
                 import json
-                def _extract(col, key):
+                def _extract_dict(col):
+                    if isinstance(col, dict):
+                        return col
                     try:
-                        data = col if isinstance(col, dict) else json.loads(col)
-                        return data.get(key)
+                        return json.loads(col)
                     except Exception:
-                        return None
-                trades_df['signal_confidence'] = trades_df['vote_detail'].apply(lambda x: _extract(x, 'confidence'))
+                        return {}
+                vd_series = trades_df['vote_detail'].apply(_extract_dict)
+                trades_df['signal_confidence'] = vd_series.apply(lambda d: d.get('confidence'))
+                # Sprint15 sizing overlay telemetry
+                trades_df['position_size'] = vd_series.apply(lambda d: (d.get('position_sizer') or {}).get('size_quote_playbook')
+                                                            or (d.get('position_sizer') or {}).get('size_quote'))
+                trades_df['atr'] = vd_series.apply(lambda d: (d.get('position_sizer') or {}).get('atr')
+                                                    or (d.get('risk_model') or {}).get('atr'))
+                trades_df['liq_cluster_risk'] = vd_series.apply(lambda d: (d.get('position_sizer') or {}).get('liq_cluster_risk'))
+                # Expected RR: prefer playbook summary fields
+                def _exp_rr(d):
+                    pb = d.get('playbook') or {}
+                    return pb.get('expected_rr') or (d.get('risk_model') or {}).get('expected_rr')
+                trades_df['expected_risk_reward'] = vd_series.apply(_exp_rr)
+                # Optional pretty formatting '1:RR'
+                def _rr_str(x):
+                    try:
+                        xr = float(x)
+                        if xr > 0:
+                            return f"1:{round(xr,2)}"
+                    except Exception:
+                        pass
+                    return None
+                trades_df['expected_risk_reward_str'] = trades_df['expected_risk_reward'].apply(_rr_str)
             except Exception:
                 pass
 
@@ -199,6 +223,67 @@ def handle_run(args: argparse.Namespace, settings: Any) -> None:
             reporter.generate_report(kpis, equity, trades_df)  # Pass raw equity list
         out_dir_msg = report_settings.get('output_dir', 'reports/backtest_results') if isinstance(report_settings, dict) else 'reports/backtest_results'
         logger.success(f"Backtest finished. Report generated in {out_dir_msg}.")
+        # --- Sprint 18: optional quality distribution & performance report ---
+        if getattr(args, 'quality_report', False):
+            try:
+                import json, math, collections
+                q_bins = []
+                vetoes = []
+                soft_flags = []
+                size_mults = []
+                rr_vals = []
+                for raw in trades_df.get('vote_detail', []):
+                    try:
+                        vd = raw if isinstance(raw, dict) else json.loads(raw)
+                    except Exception:
+                        vd = {}
+                    q = vd.get('quality') or {}
+                    if q:
+                        q_bins.append(q.get('bin'))
+                        vetoes.extend(q.get('vetoes') or [])
+                        soft_flags.extend(q.get('soft_flags') or [])
+                        size_mults.append(float(q.get('size_multiplier') or vd.get('quality_size_mult') or 1.0))
+                    else:
+                        q_bins.append(None)
+                dist = collections.Counter([b for b in q_bins if b])
+                total_q = sum(dist.values()) or 1
+                lines = ["Quality Gate Report", "====================", f"Total qualified trades: {total_q}"]
+                for b in ['A+','A','B','C','D']:
+                    cnt = dist.get(b,0); pct = cnt/total_q*100 if total_q else 0
+                    lines.append(f"{b}: {cnt} ({pct:.1f}%)")
+                # Per-bin performance metrics if pnl present
+                if 'pnl' in trades_df.columns and 'rr' in trades_df.columns:
+                    lines.append("\nPer-Bin Performance")
+                    lines.append("-------------------")
+                    for b in ['A+','A','B','C','D']:
+                        mask = [qb==b for qb in q_bins]
+                        if any(mask):
+                            sub = trades_df[mask]
+                            wins = (sub['pnl']>0).sum(); losses = (sub['pnl']<=0).sum()
+                            winrate = wins / max(1,(wins+losses))
+                            gross_win = sub[sub['pnl']>0]['pnl'].sum(); gross_loss = -sub[sub['pnl']<=0]['pnl'].sum()
+                            pf = gross_win / gross_loss if gross_loss>0 else float('inf')
+                            avg_rr = sub['rr'].mean()
+                            lines.append(f"{b}: trades={len(sub)} win%={winrate:.2%} pf={pf:.2f} avgRR={avg_rr:.2f}")
+                if vetoes:
+                    lines.append("\nTop Veto Reasons")
+                    lines.append("----------------")
+                    for r,c in collections.Counter(vetoes).most_common(10):
+                        lines.append(f"{r}: {c}")
+                if soft_flags:
+                    lines.append("\nSoft Gate Flags")
+                    lines.append("----------------")
+                    for r,c in collections.Counter(soft_flags).most_common(10):
+                        lines.append(f"{r}: {c}")
+                if size_mults:
+                    avg_mult = sum(size_mults)/len(size_mults)
+                    lines.append(f"\nAvg Size Multiplier: {avg_mult:.3f}")
+                from pathlib import Path as _P
+                qfile = _P(out_dir_msg)/'quality_report.txt'
+                qfile.write_text("\n".join(lines), encoding='utf-8')
+                logger.info("Quality report written to {}", qfile)
+            except Exception as e:
+                logger.warning(f"Failed generating quality-report: {e}")
     else:
         logger.warning("Backtest finished with no trades.")
     # NOTE: Previously exited with non-zero status; changed to return gracefully to avoid
@@ -329,12 +414,15 @@ def handle_wf(args, settings):
             routed = meta_router.resolve(sym, timeframe, profiles_root)
             settings_dict.update(routed)
             mr = routed.get('meta_router', {})
+            import time as _t
             routing_rows.append({
+                'ts': int(_t.time()),
                 'symbol': sym,
-                'timeframe': timeframe,
+                'tf': timeframe,
                 'profile_id': mr.get('profile_id'),
                 'version': mr.get('version'),
-                'fallback_chain': ' > '.join(mr.get('fallback_chain') or []) if isinstance(mr.get('fallback_chain'), list) else mr.get('fallback_chain'),
+                'used_overrides': '|'.join(mr.get('resolved_keys') or []),
+                'fall_back_chain': '>'.join(mr.get('fallback_chain') or []) if isinstance(mr.get('fallback_chain'), list) else mr.get('fallback_chain'),
             })
         result = wf.run(sym, timeframe)  # may be DataFrame or (trades_df, kpi_df)
         for df in extract_trades(result):
@@ -452,6 +540,10 @@ def handle_cal(args: argparse.Namespace, settings: Any) -> None:
             cal_cfg.setdefault('runtime', {})['seed'] = args.seed
         if getattr(args, 'study_name', None):
             cal_cfg.setdefault('runtime', {})['study_name'] = args.study_name
+        if getattr(args, 'parallel', None) is not None and int(args.parallel) > 1:
+            cal_cfg.setdefault('runtime', {})['parallel'] = int(args.parallel)
+        if getattr(args, 'parallel_mode', None):
+            cal_cfg.setdefault('runtime', {})['parallel_mode'] = str(args.parallel_mode)
         base_settings_dict = settings.model_dump() if hasattr(settings, 'model_dump') else settings
         out_dir = getattr(args, 'output_dir', 'reports/cal/run')
         Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -577,6 +669,11 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable hot-reload of profile YAML files (checks mtimes each resolve)."
     )
+    parser_run.add_argument(
+        "--quality-report",
+        action="store_true",
+        help="Emit Sprint18 quality gate distribution & per-bin performance summary to console + file."
+    )
     # NEW: add --echo flag
     parser_run.add_argument(
         "--echo",
@@ -637,6 +734,8 @@ def create_parser() -> argparse.ArgumentParser:
     parser_cal.add_argument("--timeout", type=int, default=None, help="Global optimization timeout (seconds, optional).")
     parser_cal.add_argument("--holdout-start", type=str, default=None, help="Optional holdout WF start date (YYYY-MM-DD).")
     parser_cal.add_argument("--holdout-end", type=str, default=None, help="Optional holdout WF end date (YYYY-MM-DD).")
+    parser_cal.add_argument("--parallel", type=int, default=0, help="(Future) number of parallel workers for optimization. 0=single-thread.")
+    parser_cal.add_argument("--parallel-mode", type=str, default="thread", choices=["thread","process"], help="Parallel strategy: thread (Optuna n_jobs) or process (RDB storage required).")
     parser_cal.set_defaults(func=handle_cal)
 
     return parser

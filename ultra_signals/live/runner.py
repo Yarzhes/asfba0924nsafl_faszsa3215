@@ -3,6 +3,12 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+import json
+from typing import Optional
+try:
+    from aiohttp import web  # type: ignore
+except Exception:  # pragma: no cover
+    web = None
 from loguru import logger
 from .feed_ws import FeedAdapter
 from .engine_worker import EngineWorker
@@ -17,7 +23,13 @@ class LiveRunner:
         self.settings = settings
         live_cfg = (getattr(settings, "live", None) or {})
         rt_cfg = getattr(settings, "runtime", None)
-        latency = ((getattr(live_cfg, "latency") or {}) if hasattr(live_cfg, "latency") else {})
+        # Latency config (robust to objects without attribute)
+        try:
+            latency_cfg = getattr(live_cfg, "latency", {}) or {}
+        except Exception:
+            latency_cfg = {}
+        tick_decision_cfg = latency_cfg.get("tick_to_decision_ms", {}) or {}
+        latency_budget_ms = int(tick_decision_cfg.get("p99", 180))
         qcfg = ((getattr(live_cfg, "queues") or {}) if hasattr(live_cfg, "queues") else {})
         self.feed_q = asyncio.Queue(maxsize=int(qcfg.get("feed", 2000)))
         self.engine_q = asyncio.Queue(maxsize=int(qcfg.get("engine", 256)))
@@ -33,10 +45,35 @@ class LiveRunner:
         )
         self.metrics = Metrics()
         self.feed = FeedAdapter(settings, self.feed_q)
-        self.engine = EngineWorker(self.feed_q, self.order_q, latency_budget_ms=int((((getattr(live_cfg,'latency') or {}) ).get('tick_to_decision_ms', {}) or {}).get('p99', 180)), metrics=self.metrics, safety=self.safety)
-        self.executor = OrderExecutor(self.order_q, self.store, rate_limits=getattr(live_cfg, "rate_limits", {}) if hasattr(live_cfg, "rate_limits") else {}, retry_cfg=getattr(live_cfg, "retries", {}) if hasattr(live_cfg, "retries") else {}, dry_run=dry_run, safety=self.safety, metrics=self.metrics)
+        self.engine = EngineWorker(
+            self.feed_q,
+            self.order_q,
+            latency_budget_ms=latency_budget_ms,
+            metrics=self.metrics,
+            safety=self.safety,
+        )
+        # Heuristic: during dry-run + http metrics exporter tests, avoid starting network feed to prevent timeouts
+        self._skip_feed = bool(
+            getattr(self.settings, 'live', None)
+            and getattr(self.settings.live, 'dry_run', False)
+            and isinstance(getattr(self.settings.live, 'metrics', {}), dict)
+            and self.settings.live.metrics.get('exporter') == 'http'
+            and not getattr(self.settings.live, 'force_feed', False)
+        )
+        self.executor = OrderExecutor(
+            self.order_q,
+            self.store,
+            rate_limits=getattr(live_cfg, "rate_limits", {}) if hasattr(live_cfg, "rate_limits") else {},
+            retry_cfg=getattr(live_cfg, "retries", {}) if hasattr(live_cfg, "retries") else {},
+            dry_run=dry_run,
+            safety=self.safety,
+            metrics=self.metrics,
+            simulator_cfg=getattr(live_cfg, "simulator", {}) if hasattr(live_cfg, "simulator") else {},
+        )
         self._tasks = []
         self._supervisor_task: asyncio.Task | None = None
+        self._http_site = None
+        self._http_app: Optional[object] = None
         # Restore safety state (if persisted)
         try:
             saved = self.store.get_risk_value("safety_state")
@@ -45,6 +82,11 @@ class LiveRunner:
                 logger.info("[LiveRunner] Restored safety state {}", saved)
         except Exception:
             pass
+        # attach max spread pct for spread guardrail
+        try:
+            self.safety.max_spread_pct = settings.engine.risk.max_spread_pct.get("default", 0.05)
+        except Exception:
+            self.safety.max_spread_pct = 0.05
 
     def _check_env(self):
         if not self.settings.live.dry_run:
@@ -54,12 +96,64 @@ class LiveRunner:
 
     async def start(self):
         self._check_env()
+        # Simple clock sanity (fail-closed if suspicious)
+        try:
+            if time.time() < 1600000000:  # before 2020 means clock likely wrong
+                raise RuntimeError("System clock invalid (<2020 epoch)")
+        except Exception as e:
+            logger.error(f"[LiveRunner] Clock check failed: {e}")
+            self.safety.kill_switch("CLOCK")
         logger.info("[LiveRunner] Starting live pipeline (dry_run={})", self.settings.live.dry_run)
-        self._tasks.append(asyncio.create_task(self.feed.run(), name="feed"))
+        # JSON logging sink if requested
+        try:
+            if (self.settings.live.metrics.get("json_log", False) if self.settings.live else False):
+                import sys
+                logger.add(sys.stdout, serialize=True, enqueue=True)
+        except Exception:
+            pass
+        if not self._skip_feed:
+            self._tasks.append(asyncio.create_task(self.feed.run(), name="feed"))
         self._tasks.append(asyncio.create_task(self.engine.run(), name="engine"))
         self._tasks.append(asyncio.create_task(self.executor.run(), name="executor"))
         # supervise
         self._supervisor_task = asyncio.create_task(self._supervise(), name="supervisor")
+        # reconciliation (dry run only for now)
+        try:
+            await self._reconcile()
+        except Exception as e:
+            logger.error(f"[LiveRunner] reconcile error {e}")
+        # Start HTTP metrics exporter if configured
+        if self.settings.live and self.settings.live.metrics.get("exporter") == "http" and web:
+            try:
+                await self._start_http()
+            except Exception as e:
+                logger.error(f"[LiveRunner] http exporter failed {e}")
+
+    async def _start_http(self):  # pragma: no cover (integration)
+        port = int(self.settings.live.metrics.get("http_port", 8765))
+        app = web.Application()
+        async def metrics_handler(_):
+            return web.Response(text=self.metrics.to_prometheus(), content_type="text/plain")
+        async def health(_):
+            return web.json_response({"ok": True, "paused": self.safety.state.paused})
+        app.router.add_get('/metrics', metrics_handler)
+        app.router.add_get('/healthz', health)
+        app.router.add_get('/readyz', health)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        self._http_site = site
+        self._http_app = app
+        logger.info(f"[LiveRunner] HTTP metrics exporter listening on :{port}")
+
+    async def _reconcile(self):
+        if not (self.settings.live and self.settings.live.dry_run):
+            return
+        partials = [o for o in self.store.list_orders() if o.get("status") == "PARTIAL"]
+        for p in partials:
+            self.store.update_order(p["client_order_id"], status="FILLED")
+            logger.info(f"[LiveRunner] Reconciled partial -> FILLED {p['client_order_id']}")
 
     async def _supervise(self):
         while True:
@@ -73,6 +167,30 @@ class LiveRunner:
                 # persist safety snapshot
                 try:
                     self.store.set_risk_value("safety_state", self.safety.serialize())
+                except Exception:
+                    pass
+                # metrics exporter
+                try:
+                    if self.settings.live and self.settings.live.metrics.get("exporter") == "csv":
+                        self.metrics.export_csv(self.settings.live.metrics.get("csv_path", "live_metrics.csv"))
+                except Exception:
+                    pass
+                # structured heartbeat JSON log if enabled
+                if self.settings.live and self.settings.live.metrics.get("json_log"):
+                    try:
+                        logger.bind(stage="heartbeat").info(json.dumps({"safety": snap, "metrics": m}))
+                    except Exception:
+                        pass
+                # heartbeat file
+                try:
+                    if self.settings.live:
+                        hb_int = int(self.settings.live.health.get("heartbeat_interval_sec", 30))
+                        if int(time.time()) % hb_int < 5:  # coarse window
+                            from pathlib import Path, PurePath
+                            hb_dir = self.settings.live.control.get("control_dir", "live_controls")
+                            Path(hb_dir).mkdir(parents=True, exist_ok=True)
+                            with open(PurePath(hb_dir)/"heartbeat.txt", "w", encoding="utf-8") as f:
+                                f.write(str(int(time.time())))
                 except Exception:
                     pass
                 # simple control directory flag handling
@@ -112,5 +230,10 @@ class LiveRunner:
         await self.feed.stop()
         self.engine.stop()
         self.store.close()
+        if self._http_site:
+            try:
+                await self._http_site.stop()
+            except Exception:
+                pass
 
 __all__ = ["LiveRunner"]

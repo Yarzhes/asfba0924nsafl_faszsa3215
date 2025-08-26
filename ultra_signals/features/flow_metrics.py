@@ -143,6 +143,14 @@ def compute_flow_metrics(
                 out['oi_prev'] = oi_prev
                 if oi_prev != 0:
                     out['oi_rate'] = (oi - oi_prev)/abs(oi_prev)
+                    try:
+                        spike_thr = float(cfg.get('oi', {}).get('spike_threshold', 0.12))
+                        if abs(out['oi_rate']) >= spike_thr:
+                            out['oi_spike'] = 1
+                        else:
+                            out['oi_spike'] = 0
+                    except Exception:
+                        pass
         except Exception:
             pass
 

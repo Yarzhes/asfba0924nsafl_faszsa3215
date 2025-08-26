@@ -1,4 +1,102 @@
 runtime:
+  symbols: ["BTCUSDT", "ETHUSDT"]
+  timeframes: ["5m"]
+  primary_timeframe: "5m"
+  reconnect_backoff_ms: 5000
+
+profiles:
+  root_dir: "ultra_signals/profiles"
+  hot_reload: false
+  min_required_version: "s19_2025-01-01"
+  stale_size_factor: 0.7  # safety multiplier if profile stale
+
+features:
+  warmup_periods: 120
+  trend: { ema_short: 8, ema_medium: 21, ema_long: 55 }
+  momentum: { rsi_period: 14, macd_fast: 12, macd_slow: 26, macd_signal: 9 }
+  volatility: { atr_period: 14, bbands_period: 20, bbands_stddev: 2.0 }
+  volume_flow: { vwap_window: 20, vwap_std_devs: [1.0,2.0], volume_z_window: 50 }
+
+derivatives:
+  funding_trail_len: 8
+  funding_refresh_sec: 900
+  oi: { enabled: true, provider: "mock", refresh_sec: 60 }
+  liq_pulse: { window_sec: 300, notional_weight: 1.0 }
+
+regime:
+  hysteresis_bars: 3
+  adx_min_trend: 15
+  atr_percentile_windows: 200
+  variance_ratio_window: 20
+
+weights_profiles:
+  trend: { trend: 0.3, momentum: 0.2, volatility: 0.2, flow: 0.2, orderbook: 0.05, derivatives: 0.05 }
+  mean_revert: { trend: 0.2, momentum: 0.3, volatility: 0.2, flow: 0.2, orderbook: 0.05, derivatives: 0.05 }
+  chop: { trend: 0.2, momentum: 0.25, volatility: 0.25, flow: 0.2, orderbook: 0.05, derivatives: 0.05 }
+
+filters:
+  avoid_funding_minutes: 5
+
+engine:
+  scoring_weights: { trend: 1, momentum: 1, volatility: 1, flow: 1, orderbook: 1, derivatives: 1 }
+  thresholds: { enter: 0.55, exit: 0.45 }
+  risk: { max_spread_pct: { default: 0.05 } }
+
+ensemble:
+  min_score: 0.05
+  majority_threshold: 0.55
+  veto_trend_flip: true
+  veto_band_pierce: true
+
+correlation:
+  enabled: true
+  lookback_periods: 200
+  cluster_threshold: 0.7
+  hysteresis: 0.1
+  refresh_interval_bars: 50
+
+portfolio:
+  max_exposure_per_symbol: 1000
+  max_exposure_per_cluster: 3000
+  max_net_exposure: 5000
+  max_margin_pct: 50
+  max_total_positions: 10
+  max_positions_total: 10
+  max_positions_per_symbol: 1
+  allow_scale_in: false
+  scale_in_cooldown_bars: 0
+  scale_in_min_distance_pct: 0.0
+
+brakes:
+  min_spacing_sec_cluster: 300
+  daily_loss_soft_limit_pct: 2.0
+  daily_loss_hard_limit_pct: 4.0
+  streak_cooldown_trades: 3
+  streak_cooldown_hours: 12
+
+sizing:
+  vol_risk_scale_pct: 0.5
+
+funding_rate_provider:
+  refresh_interval_minutes: 15
+
+transport:
+  telegram: { enabled: false, bot_token: null, chat_id: null }
+  dry_run: true
+
+logging:
+  level: INFO
+
+reports:
+  output_dir: reports
+
+# Sections intentionally left largely empty for profile overrides:
+ensemble: {}
+playbooks: {}
+quality_gates: {}
+position_sizing: {}
+orderflow: {}
+slippage: {}runtime:
   symbols: ["BTCUSDT","ETHUSDT"]
   timeframes: ["5m","1h"]
   primary_timeframe: "5m"

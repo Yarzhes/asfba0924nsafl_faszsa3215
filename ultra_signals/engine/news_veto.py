@@ -49,7 +49,16 @@ class NewsVeto:
         # sort events
         self._events.sort(key=lambda e: e.time)
 
-    def is_event_now(self, ts_ms: int) -> Tuple[bool, Optional[str]]:
+    def is_event_now(self, symbol: Optional[str] = None, ts_ms: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+        """Return (blocked, reason) if current timestamp is inside any embargo window.
+
+        Backward compatible: old calls passed only ts_ms; symbol is informational for
+        future per-symbol calendars (ignored for now).
+        """
+        # Allow legacy positional call: is_event_now(ts_ms)
+        if isinstance(symbol, (int, float)) and ts_ms is None:
+            ts_ms = int(symbol)  # shift args
+            symbol = None
         if not self.enabled or not self._events or ts_ms is None:
             return False, None
         try:
@@ -59,7 +68,6 @@ class NewsVeto:
         for ev in self._events:
             if self.high_impact_only and ev.impact != 'HIGH':
                 continue
-            # embargo window
             start = ev.time - pd.Timedelta(minutes=self.embargo_minutes)
             end = ev.time + pd.Timedelta(minutes=self.embargo_minutes)
             if start <= now <= end:

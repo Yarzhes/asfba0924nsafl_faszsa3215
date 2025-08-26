@@ -16,7 +16,7 @@ def make_client_order_id(plan: Dict[str, Any]) -> str:
 
 
 class OrderExecutor:
-    def __init__(self, queue: asyncio.Queue, store: StateStore, rate_limits: Dict[str, int], retry_cfg: Dict[str, Any], dry_run: bool = True, safety=None, metrics=None, order_sender: Optional[Callable[[Dict[str, Any], str], None]] = None):
+    def __init__(self, queue: asyncio.Queue, store: StateStore, rate_limits: Dict[str, int], retry_cfg: Dict[str, Any], dry_run: bool = True, safety=None, metrics=None, order_sender: Optional[Callable[[Dict[str, Any], str], None]] = None, simulator_cfg: Optional[Dict[str, Any]] = None):
         self.queue = queue
         self.store = store
         self.rate_limits = rate_limits or {"orders_per_sec": 8, "cancels_per_sec": 8}
@@ -27,6 +27,7 @@ class OrderExecutor:
         self.safety = safety
         self.metrics = metrics
         self._order_sender = order_sender  # injectable for tests
+        self.simulator_cfg = simulator_cfg or {}
 
     async def run(self):
         self._running = True
@@ -64,8 +65,16 @@ class OrderExecutor:
                 if self._order_sender:
                     self._order_sender(plan, client_id)
                 elif self.dry_run:
-                    # Simulated partial fill path (20% chance of partial first)
-                    if random.random() < 0.2:
+                    # Simulator probabilities
+                    reject_prob = float(self.simulator_cfg.get("reject_prob", 0.02))
+                    part_prob = float(self.simulator_cfg.get("partial_fill_prob", 0.2))
+                    if random.random() < reject_prob:
+                        self.store.update_order(client_id, status="REJECTED", last_error="SIM_REJECT")
+                        if self.metrics:
+                            self.metrics.inc("orders_errors")
+                        logger.warning(f"[OrderExec] DRY-RUN simulated rejection {client_id}")
+                        return
+                    if random.random() < part_prob:
                         part = round(random.uniform(0.3, 0.7), 4)
                         logger.info(f"[OrderExec] DRY-RUN partial fill {part*100:.1f}% {client_id}")
                         self.store.update_order(client_id, status="PARTIAL", exchange_order_id=f"SIM-{client_id[:8]}", last_error=None)
@@ -74,8 +83,14 @@ class OrderExecutor:
                         if self.metrics:
                             self.metrics.inc("orders_sent")
                         return
-                    logger.info(f"[OrderExec] DRY-RUN would place order {client_id}: {plan}")
-                    self.store.update_order(client_id, status="FILLED", exchange_order_id=f"SIM-{client_id[:8]}")
+                    # Slippage application
+                    slip_min = float(self.simulator_cfg.get("slippage_bps_min", -1.0))
+                    slip_max = float(self.simulator_cfg.get("slippage_bps_max", 1.5))
+                    slip_bps = random.uniform(slip_min, slip_max)
+                    px = plan.get("price")
+                    exec_price = px * (1 + slip_bps/10000.0) if isinstance(px, (int,float)) else px
+                    logger.info(f"[OrderExec] DRY-RUN fill {client_id} slip_bps={slip_bps:.3f} exec_price={exec_price}")
+                    self.store.update_order(client_id, status="FILLED", exchange_order_id=f"SIM-{client_id[:8]}", exec_price=exec_price)
                 else:
                     logger.info(f"[OrderExec] LIVE place order {client_id}: {plan}")
                     self.store.update_order(client_id, status="FILLED", exchange_order_id=f"EX-{client_id[:8]}")

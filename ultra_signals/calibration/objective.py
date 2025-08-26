@@ -181,6 +181,24 @@ def evaluate_candidate(settings_dict: Dict[str, Any], wf_cfg: Dict[str, Any]) ->
         'oos_stability': oos_stability,
         'fold_count': len(fold_pfs),
     }
+    # Sprint 19 spec: capture A+/A/B/C/D distribution (proportions) if bin column present
+    try:
+        if 'bin' in trades_df.columns and len(trades_df) > 0:
+            dist = trades_df['bin'].value_counts(dropna=False)
+            total = float(len(trades_df)) or 1.0
+            # normalize label variations (A+ vs Aplus) just store canonical
+            metrics['grade_Aplus_pct'] = float(dist.get('A+', 0.0)) / total
+            metrics['grade_A_pct'] = float(dist.get('A', 0.0)) / total
+            metrics['grade_B_pct'] = float(dist.get('B', 0.0)) / total
+            metrics['grade_C_pct'] = float(dist.get('C', 0.0)) / total
+            metrics['grade_D_pct'] = float(dist.get('D', 0.0)) / total
+            # Convenience ratio: good (A+/A) vs poor (C/D) to facilitate custom weighting later
+            good = metrics['grade_Aplus_pct'] + metrics['grade_A_pct']
+            poor = metrics['grade_C_pct'] + metrics['grade_D_pct']
+            metrics['grade_good_poor_ratio'] = good / poor if poor > 0 else good if good > 0 else 0.0
+    except Exception:
+        # Do not let distribution calculation break optimization loop
+        pass
     # Overfit gap proxy
     if fold_pfs:
         pf_is_proxy = max(fold_pfs)  # optimistic in-sample

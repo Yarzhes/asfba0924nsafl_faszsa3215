@@ -242,6 +242,8 @@ class FeatureVector(BaseModel):
     volatility: Optional[VolatilityFeatures] = None
     volume_flow: Optional[VolumeFlowFeatures] = None
     alpha_v2: Optional[AlphaV2Features] = None
+    # Sprint 11 addition: expose flow metrics inside FV for logging/telemetry
+    flow_metrics: Optional[FlowMetricsFeatures] = None
 
 
 class TradeSide(str, Enum):

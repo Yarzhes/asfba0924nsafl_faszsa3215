@@ -86,9 +86,15 @@ class ReportGenerator:
 
     # ---------------- NEW: Routing audit + profile metrics ----------------
     def _save_routing_audit_csv(self, audit: pd.DataFrame):
+        # Normalize legacy/new column names
+        df = audit.copy()
+        # If legacy columns present, keep them; else ensure spec columns exist
+        for col in ['ts','symbol','tf','profile_id','version','used_overrides','fall_back_chain']:
+            if col not in df.columns:
+                df[col] = None
         path = self.output_dir / "routing_audit.csv"
         try:
-            audit.to_csv(path, index=False)
+            df.to_csv(path, index=False)
         except Exception:
             pass
 

@@ -117,7 +117,9 @@ python -m ultra_signals.apps.backtest_cli cal \
     - `opt_history.(png|html)` & `param_importances.(png|html)` if visualization libs available
 4. If holdout status is PROMOTED, adopt `settings_autotuned.yaml` for further backtests.
 
-Composite score balances PF, Winrate, Sharpe, Drawdown (penalized), Stability (1 - PF stdev), with penalties for insufficient trades and overfit gap.
+Composite score balances PF, Winrate, Sharpe, Drawdown (penalized), Stability (1 - PF stdev), with penalties for insufficient trades and overfit gap. Grade distribution (A+/A/B/C/D) is collected; you can optionally add a weight like `grade_good_poor_ratio: 0.05` under `objective.weights` to encourage more high-quality signals.
+
+Parallel optimization: use `--parallel N` (threads) or `--parallel N --parallel-mode process` (multi-process via SQLite study DB) for faster searches when trials are expensive.
 
 ### 5. Output Artifacts
 

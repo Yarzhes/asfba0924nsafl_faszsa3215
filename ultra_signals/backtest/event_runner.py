@@ -370,6 +370,30 @@ class EventRunner:
             stop_val = rl.get("stop")
             tp_val   = rl.get("tp")
 
+            # --- NEW (Sprint12 trailing stop using risk_model metadata) ---
+            try:
+                rl_meta = rl.get('_meta') if isinstance(rl, dict) else None
+                if rl_meta and rl_meta.get('source') == 'risk_model':
+                    atr = float(rl_meta.get('atr') or 0.0)
+                    atr_mult_stop = float(rl_meta.get('atr_mult_stop') or 0.0)
+                    entry_px_meta = float(rl_meta.get('entry_price') or 0.0)
+                    side_meta = rl_meta.get('side') or side_up
+                    # Apply simple trailing rule: once move > 1*ATR, raise (or lower for SHORT) stop by 0.5*ATR*mult
+                    if atr > 0 and atr_mult_stop > 0 and entry_px_meta > 0:
+                        if side_meta == 'LONG' and (bar_close - entry_px_meta) > atr:
+                            new_stop = max(stop_val, bar_close - atr * atr_mult_stop * 0.5)
+                            if new_stop is not None and new_stop > (stop_val or 0):
+                                rl['stop'] = new_stop
+                                stop_val = new_stop
+                        elif side_meta == 'SHORT' and (entry_px_meta - bar_close) > atr:
+                            new_stop = min(stop_val, bar_close + atr * atr_mult_stop * 0.5) if stop_val is not None else bar_close + atr * atr_mult_stop * 0.5
+                            if new_stop is not None and (stop_val is None or new_stop < stop_val):
+                                rl['stop'] = new_stop
+                                stop_val = new_stop
+            except Exception:
+                pass
+            # --------------------------------------------------------------
+
             self.log.debug(
                 f"DEBUG ExitCheck: ts={timestamp}, side={side_up}, price={bar_close}, "
                 f"stop={'N/A' if stop_val is None else stop_val}, "
@@ -668,18 +692,51 @@ class EventRunner:
 
             close_px = float(bar["close"])
             size = self.portfolio.position_size(symbol, close_px) * float(size_scale)
+            # --- NEW (Sprint12): override with adaptive risk_model sizing & stops if present ---
+            try:
+                rm = None
+                vd = getattr(decision, 'vote_detail', None)
+                if isinstance(vd, dict):
+                    rm = vd.get('risk_model') if isinstance(vd.get('risk_model'), dict) else None
+                if rm:
+                    # Preferred: playbook-adjusted size if present
+                    size_quote = rm.get('position_size_playbook') or rm.get('position_size')
+                    if size_quote and close_px > 0:
+                        size_adaptive = float(size_quote) / float(close_px)
+                        if size_adaptive > 0:
+                            size = size_adaptive
+                    # Inject risk model SL/TP directly if available
+                    sl = rm.get('stop_loss')
+                    tp = rm.get('take_profit')
+                    if sl is not None or tp is not None:
+                        self._risk_levels[symbol] = {
+                            'stop': float(sl) if sl is not None else None,
+                            'tp': float(tp) if tp is not None else None,
+                            '_meta': {
+                                'source': 'risk_model',
+                                'atr': rm.get('atr'),
+                                'atr_mult_stop': rm.get('atr_mult_stop') or self.settings.get('risk_model', {}).get('atr_multiplier_stop'),
+                                'atr_mult_tp': rm.get('atr_mult_tp') or self.settings.get('risk_model', {}).get('atr_multiplier_tp'),
+                                'entry_price': close_px,
+                                'side': action
+                            }
+                        }
+            except Exception:
+                pass
+            # -------------------------------------------------------------------------------
             self.log.info(f"Trade for {symbol} at {timestamp} ALLOWED by portfolio gate.")
             self.portfolio.open_position(symbol, action, close_px, timestamp, size)
             self.entries_count_total += 1  # count successful entries
             self.log.info(f"INFO Opened {action} position for {symbol} at {close_px} with size {size:.4f}")
 
-            # Compute + store SL/TP right on entry
-            side_up = str(action).upper()
-            rl_calc = _compute_initial_risk_levels(self.feature_store, symbol, timeframe, timestamp, side_up, close_px, self.settings)
-            self._risk_levels[symbol] = {"stop": rl_calc["stop"], "tp": rl_calc["tp"]}
-            self.log.info(
-                f"Risk levels set for {symbol} on entry: stop={rl_calc['stop']}, tp={rl_calc['tp']} (source={rl_calc['source']})"
-            )
+            # If risk_model did not set SL/TP, compute legacy levels
+            if symbol not in self._risk_levels or (self._risk_levels.get(symbol, {}).get('stop') is None and self._risk_levels.get(symbol, {}).get('tp') is None):
+                side_up = str(action).upper()
+                rl_calc = _compute_initial_risk_levels(self.feature_store, symbol, timeframe, timestamp, side_up, close_px, self.settings)
+                self._risk_levels[symbol] = {"stop": rl_calc["stop"], "tp": rl_calc["tp"]}
+                self.log.info(
+                    f"Risk levels set for {symbol} on entry: stop={rl_calc['stop']}, tp={rl_calc['tp']} (source={rl_calc['source']})"
+                )
 
 
 class MockSignalEngine:

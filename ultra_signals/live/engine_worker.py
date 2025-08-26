@@ -10,7 +10,7 @@ import asyncio
 import time
 from typing import Dict, Any, Optional
 from loguru import logger
-from ultra_signals.core.events import KlineEvent, MarketEvent
+from ultra_signals.core.events import KlineEvent, MarketEvent, BookTickerEvent
 
 
 class EngineWorker:
@@ -30,6 +30,10 @@ class EngineWorker:
                 evt: MarketEvent = await self.in_queue.get()
             except asyncio.CancelledError:
                 break
+            if isinstance(evt, BookTickerEvent):
+                # cache best bid/ask
+                setattr(self, "_last_bidask", (evt.symbol, evt.best_bid, evt.best_ask))
+                continue
             if isinstance(evt, KlineEvent) and evt.closed:
                 started = time.perf_counter()
                 # Force artificial delay if requested (test hook)
@@ -47,6 +51,16 @@ class EngineWorker:
                 if self.safety and self.safety.state.paused:
                     logger.warning("[EngineWorker] Safety paused – skipping plan emission")
                     continue
+                # Spread guardrail
+                bidask = getattr(self, "_last_bidask", None)
+                if bidask and bidask[0] == evt.symbol:
+                    _, bid, ask = bidask
+                    if bid and ask and ask > 0:
+                        spread_pct = (ask - bid) / ask * 100
+                        max_spread_pct = getattr(self.safety, 'max_spread_pct', 0.05) if self.safety else 0.05
+                        if spread_pct > max_spread_pct:
+                            logger.warning(f"[EngineWorker] Spread {spread_pct:.3f}% > {max_spread_pct}% – abstain")
+                            continue
                 plan = {
                     "ts": evt.timestamp,
                     "symbol": evt.symbol,

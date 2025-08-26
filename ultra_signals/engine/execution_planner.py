@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any
 import math
 from loguru import logger
 from .playbooks import (
-    Playbook, FACTORY_MAP,
+    Playbook,
     make_trend_breakout, make_trend_pullback,
     make_mr_bollinger_fade, make_mr_vwap_revert, make_chop_flat
 )
@@ -139,18 +139,34 @@ def build_plan(playbook: Playbook, features: Dict[str, Any], decision, settings:
     if not _orderflow_pass(playbook.entry.of_confirm or {}, of_detail or {}, decision.decision):
         return None
 
-    # ATR for stop sizing
+    # ATR for stop sizing & price level computation
+    close_price = (features.get('ohlcv') or {}).get('close') or None
     atr = getattr(volatility, 'atr', None) if volatility else None
-    if atr is None or atr == 0:
+    if (atr is None or atr == 0) and close_price:
         # fallback: treat 1% of price as atr approx
-        close = (features.get('ohlcv') or {}).get('close') or 1.0
-        atr = close * 0.01
-    stop_dist = playbook.exit.stop_atr_mult * atr
+        atr = close_price * 0.01
+    if atr is None or atr == 0:
+        # still nothing -> cannot build price-based plan, but return multipliers
+        atr = None
+
     first_tp_mult = playbook.exit.tp_atr_mults[0] if playbook.exit.tp_atr_mults else (playbook.exit.stop_atr_mult * 1.4)
     exp_rr = _expected_rr(playbook.exit.stop_atr_mult, first_tp_mult)
     if playbook.risk.rr_min and exp_rr and exp_rr < playbook.risk.rr_min:
         return None
 
+    # Compute concrete stop/tp price bands if we have price + atr
+    stop_price = None
+    tp_bands = []
+    side = getattr(decision, 'decision', 'LONG')
+    if close_price and atr:
+        if side == 'LONG':
+            stop_price = close_price - playbook.exit.stop_atr_mult * atr
+            tp_bands = [close_price + m * atr for m in playbook.exit.tp_atr_mults]
+        elif side == 'SHORT':
+            stop_price = close_price + playbook.exit.stop_atr_mult * atr
+            tp_bands = [close_price - m * atr for m in playbook.exit.tp_atr_mults]
+
+    # Build plan (retain existing keys for backward compatibility; add new ones)
     plan = {
         'entry_type': 'market',
         'stop_atr_mult': playbook.exit.stop_atr_mult,
@@ -161,8 +177,53 @@ def build_plan(playbook: Playbook, features: Dict[str, Any], decision, settings:
         'cooldown_bars': playbook.risk.cooldown_bars,
         'reason': playbook.name,
         'expected_rr': exp_rr,
+        'stop_price': stop_price,
+        'tp_bands': tp_bands,
+        'atr_used': atr,
     }
-    logger.debug('[PLAN] pb={} conf={:.2f} exp_rr={} size_scale={} trail@{} timeout={} tp={} stop_mult={}',
-                 playbook.name, decision.confidence, round(exp_rr,3) if exp_rr else None, playbook.risk.size_scale,
-                 playbook.exit.trail_after_rr, playbook.exit.timeout_bars, playbook.exit.tp_atr_mults, playbook.exit.stop_atr_mult)
+
+    # Enriched debug line (align closer to spec wording)
+    adx_val = getattr(trend, 'adx', None) if trend else None
+    ema_sep_val = _ema_separation_atr(features)
+    try:
+        logger.debug(
+            '[PLAN] pb={} side={} conf={:.2f} adx={} ema_sep_atr={} rr={} size_scale={} trail@{} timeout={} stop_mult={} tps={} atr={}',
+            playbook.name,
+            side,
+            decision.confidence,
+            round(adx_val, 2) if adx_val is not None else None,
+            round(ema_sep_val, 3) if ema_sep_val is not None else None,
+            round(exp_rr, 3) if exp_rr else None,
+            playbook.risk.size_scale,
+            playbook.exit.trail_after_rr,
+            playbook.exit.timeout_bars,
+            playbook.exit.stop_atr_mult,
+            playbook.exit.tp_atr_mults,
+            round(atr, 4) if atr else None,
+        )
+    except Exception:
+        pass
     return plan
+
+
+def is_plan_timed_out(plan: Dict[str, Any], bars_since_creation: int, realized_rr: float | None) -> bool:
+    """Utility for backtest/runtime loops to decide if an open (unfilled or stale)
+    execution plan should be cancelled due to timeout.
+
+    Logic (simple, spec-aligned):
+      - If plan has timeout_bars and bars_since_creation >= timeout_bars
+        AND realized_rr (progress toward first TP) < 0.1 RR -> timed out.
+      - If no timeout_bars configured, never times out here.
+    """
+    if not plan or not isinstance(plan, dict):
+        return False
+    tb = plan.get('timeout_bars')
+    if not tb or tb <= 0:
+        return False
+    try:
+        if bars_since_creation >= int(tb):
+            prog = float(realized_rr or 0.0)
+            return prog < 0.10
+    except Exception:
+        return False
+    return False

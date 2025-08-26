@@ -316,6 +316,12 @@ def combine_subsignals(
         ensemble_settings.get("majority_threshold", 0.51),
         decision_dir,
     )
+    # Attach threshold used for transparency (Sprint 13 visualization requirement)
+    try:
+        vote_detail.setdefault("vote_threshold", round(vote_threshold, 4))
+    except Exception:
+        pass
+
     return EnsembleDecision(
         ts=ts,
         symbol=symbol,

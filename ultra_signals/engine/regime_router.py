@@ -71,10 +71,14 @@ class RegimeRouter:
     def route(features: Dict[str, object], settings: Dict) -> Dict:
         reg = RegimeRouter.detect_regime(features, settings)
         alphas, prof_cfg = RegimeRouter.pick_alphas(reg, settings)
+        # Provide both legacy keys and Sprint-13 visualization friendly aliases.
         out = {
-            "regime": reg,
-            "alphas": alphas,
+            "regime": reg,                       # legacy
+            "detected": reg,                     # alias for visualization
+            "alphas": alphas,                    # legacy
+            "alphas_used": alphas,               # alias
             "weight_scale": prof_cfg.get("weight_scale", 1.0),
+            "confidence_boost": prof_cfg.get("weight_scale", 1.0),  # alias
             "min_confidence": prof_cfg.get("min_confidence", 0.0),
         }
         logger.debug("[REGIME_ROUTER] {}", out)

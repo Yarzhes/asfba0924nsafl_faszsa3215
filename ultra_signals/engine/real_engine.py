@@ -2,6 +2,7 @@ from typing import Dict, Optional, Any, List
 
 import pandas as pd
 from loguru import logger
+from time import perf_counter  # Sprint 30 performance timing for MTC
 
 from ultra_signals.core.feature_store import FeatureStore
 from ultra_signals.core.custom_types import EnsembleDecision, FeatureVector, SubSignal, RiskEvent
@@ -11,9 +12,30 @@ from ultra_signals.engine.regime_router import RegimeRouter
 from ultra_signals.engine.orderflow import OrderFlowAnalyzer, OrderFlowSnapshot, apply_orderflow_modulation
 from ultra_signals.engine.liquidation_heatmap import LiquidationHeatmap
 from ultra_signals.engine.position_sizer import PositionSizer
+from ultra_signals.engine.sizing.advanced_sizer import AdvancedSizer
 from ultra_signals.engine.execution_planner import select_playbook, build_plan
 from ultra_signals.engine.news_veto import NewsVeto
 from ultra_signals.engine.quality_gates import QualityGates
+from ultra_signals import events  # Sprint 28 events gating
+from ultra_signals.engine.gates import liquidity_gate, LiquidityGate  # Sprint 29 liquidity gate
+from ultra_signals.engine.gates import evaluate_mtc_gate  # Sprint 30 MTC gate
+from ultra_signals.engine.gates import evaluate_meta_gate  # Sprint 31 Meta probability gate
+from ultra_signals.engine.gates.whale_gate import evaluate_whale_gate  # Sprint 41 Whale gate
+from ultra_signals.behavior import BehaviorEngine  # Sprint 45 behavioral veto
+from ultra_signals.features.htf_cache import HTFFeatureCache
+# Sprint 22 optional portfolio hedging modules (guarded)
+try:  # pragma: no cover
+    from ultra_signals.portfolio.correlations import RollingCorrelationBeta
+    from ultra_signals.portfolio.exposure import PortfolioExposure
+    from ultra_signals.portfolio.hedger import BetaHedger
+    from ultra_signals.portfolio.risk_caps import PortfolioRiskCaps
+    from ultra_signals.portfolio.hedge_report import HedgeReportCollector, HedgeSnapshot
+    # Sprint 33 new modules
+    from ultra_signals.portfolio.risk_estimator import RiskEstimator
+    from ultra_signals.portfolio.allocator import PortfolioAllocator
+except Exception:  # If missing, engine continues without hedging
+    RollingCorrelationBeta = PortfolioExposure = BetaHedger = PortfolioRiskCaps = HedgeReportCollector = HedgeSnapshot = None
+    RiskEstimator = PortfolioAllocator = None
 
 
 def _trace_engine_flat(symbol: str, timeframe: str, ts_epoch: int,
@@ -101,6 +123,91 @@ class RealSignalEngine:
     def __init__(self, settings: Dict, feature_store: FeatureStore):
         self.settings = settings or {}
         self.feature_store = feature_store
+        # Sprint 32 advanced sizer
+        try:
+            self._adv_sizer = AdvancedSizer(self.settings)
+        except Exception:
+            self._adv_sizer = None
+        # Sprint 22: optional portfolio hedge state
+        ph_cfg = (self.settings.get("portfolio_hedge") or {}) if isinstance(self.settings, dict) else {}
+        self._ph_enabled = bool(ph_cfg.get("enabled", False)) and RollingCorrelationBeta is not None
+        if self._ph_enabled:
+            try:
+                self._ph_corr = RollingCorrelationBeta(
+                    leader=ph_cfg.get("leader", "BTCUSDT"),
+                    lookback=int(ph_cfg.get("lookback_bars", 288)),
+                    shrinkage_lambda=float(ph_cfg.get("shrinkage_lambda", 0.0)),
+                )
+                self._ph_corr.corr_threshold_high = float(ph_cfg.get("corr_threshold_high", 0.55))
+                self._ph_exposure = PortfolioExposure(cluster_map=ph_cfg.get("cluster_map", {}))
+                band = ph_cfg.get("beta_band", {"min": -0.15, "max": 0.15})
+                self._ph_caps = PortfolioRiskCaps(
+                    beta_band=(float(band.get("min", -0.15)), float(band.get("max", 0.15))),
+                    beta_hard_cap=float(ph_cfg.get("beta_hard_cap", 0.25)),
+                    block_if_exceeds_beta_cap=bool((ph_cfg.get("open_guard", {}) or {}).get("block_if_exceeds_beta_cap", True)),
+                    downscale_if_over_band=bool((ph_cfg.get("open_guard", {}) or {}).get("downscale_if_over_band", True)),
+                    downscale_factor=float((ph_cfg.get("open_guard", {}) or {}).get("downscale_factor", 0.5)),
+                    cluster_caps=ph_cfg.get("cluster_caps", {}),
+                )
+                self._ph_hedger = BetaHedger(
+                    leader=ph_cfg.get("leader", "BTCUSDT"),
+                    beta_band=(float(band.get("min", -0.15)), float(band.get("max", 0.15))),
+                    min_rebalance_frac=float((ph_cfg.get("rebalance", {}) or {}).get("min_notional", 0.005)),
+                    taker_fee=float((ph_cfg.get("costs", {}) or {}).get("taker_fee", 0.0004)),
+                    cooloff_bars=int((ph_cfg.get("rebalance", {}) or {}).get("cooloff_bars", 3)),
+                )
+                self._ph_report = HedgeReportCollector()
+                self._ph_equity = float((self.settings.get("portfolio", {}) or {}).get("mock_equity", 10_000.0))
+                # Leader bias configuration (optional)
+                self._ph_bias_cfg = (ph_cfg.get("leader_bias") or {}) if isinstance(ph_cfg, dict) else {}
+            except Exception as e:  # pragma: no cover
+                logger.warning("Portfolio hedge init failed: {}", e)
+                self._ph_enabled = False
+        # Sprint 29: persistent liquidity gate (cooldown stateful)
+        try:
+            self._lq_gate = LiquidityGate(self.settings)
+        except Exception:
+            self._lq_gate = None
+        # Sprint 30 HTF cache for MTC
+        try:
+            self._htf_cache = HTFFeatureCache(feature_store, self.settings)
+        except Exception:
+            self._htf_cache = None
+        # Sprint 45: Behavioral finance engine
+        try:
+            self._behavior_eng = BehaviorEngine(self.settings, feature_store)
+        except Exception:
+            self._behavior_eng = None
+        # Sprint 30: perf accumulator for MTC gate (initialize after caches)
+        try:
+            self._mtc_perf = {"count": 0, "total_ms": 0.0, "max_ms": 0.0}
+        except Exception:
+            self._mtc_perf = {"count": 0, "total_ms": 0.0, "max_ms": 0.0}
+        # Sprint 33: external open positions snapshot (injected by runner / live execution layer)
+        self._external_open_positions = []  # list[dict]
+        # Sprint 33: timeseries metrics accumulation for reporting
+        self._pr_metrics_ts = []  # list[dict]
+
+    # ----------------- Sprint 33 helpers (open positions + metrics) -----------------
+    def set_open_positions(self, positions: list[dict]) -> None:
+        """Inject current live/backtest open positions.
+        Expected schema per position (keys used if present):
+          symbol, side (LONG/SHORT), qty, entry_price, stop_price, risk_amount, cluster
+        risk_amount optional: if missing will attempt to derive later.
+        """
+        try:
+            if isinstance(positions, list):
+                self._external_open_positions = positions
+        except Exception:
+            pass
+
+    def get_portfolio_risk_metrics_ts(self) -> list[dict]:
+        """Return accumulated per-bar portfolio risk metrics timeseries (shallow copy)."""
+        try:
+            return list(self._pr_metrics_ts)
+        except Exception:
+            return []
+    # -------------------------------------------------------------------------------
 
     # ---------- robust feature fetch ----------
     def _get_features_robust(self, symbol: str, timestamp_like: Any, timeframe: Optional[str]) -> Optional[dict]:
@@ -239,6 +346,7 @@ class RealSignalEngine:
             momentum=features.get("momentum"),
             volatility=features.get("volatility"),
             volume_flow=features.get("volume_flow"),
+            regime=features.get("regime"),
             derivatives=None,
             orderbook=None,
             rs=None,
@@ -268,6 +376,18 @@ class RealSignalEngine:
                 of_snapshot = OrderFlowAnalyzer.build_snapshot(trades, liqs, ob, self.settings, prev_cvd)
             except Exception:
                 of_snapshot = None
+
+        # Sprint 22: update rolling correlations (cheap incremental append)
+        if self._ph_enabled:
+            try:
+                close_px = float(feature_vector.ohlcv.get("close", 0.0)) if feature_vector and feature_vector.ohlcv else None
+                if close_px and close_px > 0:
+                    self._ph_corr.update_price(symbol, close_px, ts_epoch)
+                    # Recompute betas when leader updates or every 25 leader bars equivalently for others
+                    if symbol == self._ph_corr.leader or (len(self._ph_corr._prices.get(symbol, [])) % 25 == 0):
+                        self._ph_corr.recompute()
+            except Exception:
+                pass
 
         # 4) Subsignals from scores
         subsignals: List[SubSignal] = []
@@ -420,6 +540,58 @@ class RealSignalEngine:
                 final_decision.confidence,
                 final_decision.vote_detail,
             )
+        # Sprint 45: Behavioral Engine evaluation (early attach so downstream gates can see)
+        try:
+            if getattr(self, '_behavior_eng', None):
+                beh_bundle = {
+                    'ohlcv': feature_vector.ohlcv,
+                    'flow_metrics': features.get('flow_metrics'),
+                    'derivatives': features.get('derivatives'),
+                    'regime': features.get('regime'),
+                    'sentiment': final_decision.vote_detail.get('sentiment') if isinstance(final_decision.vote_detail, dict) else None,
+                    'whales': final_decision.vote_detail.get('whales') if isinstance(final_decision.vote_detail, dict) else None,
+                }
+                beh_feats = self._behavior_eng.evaluate(symbol, ts_epoch, beh_bundle)
+                if beh_feats:
+                    # attach into feature_vector for optional logging & downstream
+                    try:
+                        feature_vector.behavior = beh_feats
+                    except Exception:
+                        pass
+                    final_decision.vote_detail.setdefault('behavior', beh_feats.model_dump() if hasattr(beh_feats,'model_dump') else beh_feats.__dict__)
+                    # Apply behavioral action pre-quality-gates: if veto -> immediate FLAT with code
+                    if final_decision.decision in ('LONG','SHORT') and beh_feats.behavior_action == 'VETO':
+                        final_decision.decision = 'FLAT'
+                        final_decision.vetoes.append('BEHAVIOR_VETO')
+                        final_decision.vote_detail.setdefault('reason','BEHAVIOR_VETO')
+                    elif final_decision.decision in ('LONG','SHORT') and beh_feats.behavior_action == 'DAMPEN':
+                        # store multiplier to apply after base risk model sizing (layered)
+                        final_decision.vote_detail.setdefault('behavior_size_mult', beh_feats.behavior_size_mult or 1.0)
+        except Exception as e:  # pragma: no cover
+            logger.debug('Behavior engine error: {}', e)
+        # Sprint 42: attach latest macro features (if computed) for transport & macro gating transparency
+        try:
+            macro_feats = features.get('macro') if isinstance(features, dict) else None
+            if macro_feats:
+                snap = macro_feats.model_dump() if hasattr(macro_feats, 'model_dump') else dict(macro_feats)
+                final_decision.vote_detail.setdefault('macro', snap)
+                # expose snapshot to ensemble (used for gating) via transient settings key
+                # (safe: ephemeral; not persisted)
+                self.settings['_latest_macro'] = snap
+        except Exception:
+            pass
+        # Attach simple regime snapshot for downstream transports / telemetry
+        try:
+            reg_obj = features.get("regime")
+            if reg_obj is not None:
+                final_decision.vote_detail.setdefault("regime", {
+                    "primary": getattr(reg_obj, "profile", None).value if getattr(reg_obj, "profile", None) else None,
+                    "vol": getattr(reg_obj, "vol_state", None).value if getattr(reg_obj, "vol_state", None) else None,
+                    "liq": getattr(reg_obj, "liquidity", None).value if getattr(reg_obj, "liquidity", None) else None,
+                    "confidence": round(float(getattr(reg_obj, "confidence", 0.0) or 0.0), 3),
+                })
+        except Exception:
+            pass
         # Attach meta-router profile metadata if present in settings
         try:
             mr = (self.settings or {}).get('meta_router')
@@ -476,6 +648,140 @@ class RealSignalEngine:
             logger.exception("Playbook integration error: {}", e)
 
         # ------------------------------------------------------------------
+        # Sprint 30 MTC Gate (after ensemble+orderflow modulation, before quality/news/liquidity)
+        # ------------------------------------------------------------------
+        mtc_outcome = None
+        try:
+            if final_decision.decision in ("LONG", "SHORT"):
+                mtc_cfg = (self.settings.get("mtc") or {}) if isinstance(self.settings, dict) else {}
+                if mtc_cfg.get("enabled", True) and getattr(self, "_htf_cache", None):
+                    ladders = (mtc_cfg.get("ladders") or {})
+                    ladder = ladders.get(tf) or ladders.get(tf.lower())
+                    htf_map = {}
+                    if ladder:
+                        if len(ladder) >= 1:
+                            htf_map["C1"] = self._htf_cache.get_htf_features(symbol, ladder[0], ts_epoch)
+                        if len(ladder) >= 2:
+                            htf_map["C2"] = self._htf_cache.get_htf_features(symbol, ladder[1], ts_epoch)
+                    # Drop None values
+                    htf_map = {k: v for k, v in htf_map.items() if v is not None}
+                    t0 = perf_counter()
+                    mtc_outcome = evaluate_mtc_gate(final_decision.decision, symbol, tf, ts_epoch, current_regime, self.settings, htf_map)
+                    elapsed_ms = (perf_counter() - t0) * 1000.0
+                    # Accumulate perf stats
+                    try:
+                        self._mtc_perf["count"] += 1
+                        self._mtc_perf["total_ms"] += elapsed_ms
+                        if elapsed_ms > self._mtc_perf["max_ms"]:
+                            self._mtc_perf["max_ms"] = elapsed_ms
+                        # Periodic log every 200 evals
+                        if self._mtc_perf["count"] % 200 == 0:
+                            avg = self._mtc_perf["total_ms"] / max(1, self._mtc_perf["count"])
+                            logger.debug(f"[MTC] perf avg={avg:.3f}ms max={self._mtc_perf['max_ms']:.3f}ms n={self._mtc_perf['count']}")
+                    except Exception:
+                        pass
+                    observe_only = bool(mtc_cfg.get("observe_only", False))
+                    final_decision.vote_detail.setdefault("mtc_gate", {
+                        "action": getattr(mtc_outcome, 'action', None),
+                        "status": getattr(mtc_outcome, 'status', None),
+                        "scores": getattr(mtc_outcome, 'scores', {}),
+                        "reasons": getattr(mtc_outcome, 'reasons', []),
+                        "elapsed_ms": round(elapsed_ms, 3),
+                        "observe_only": observe_only,
+                    })
+                    # Enforce only if not observe-only
+                    if not observe_only:
+                        if mtc_outcome.action == "VETO":
+                            final_decision.vetoes.append("MTC_VETO")
+                            final_decision.decision = "FLAT"
+                            final_decision.vote_detail.setdefault("reason", "MTC_FAIL")
+                    else:
+                        # Normalize action semantics to ENTER so downstream logic doesn't dampen/ veto
+                        # but preserve original under meta_original_action
+                        try:
+                            md = final_decision.vote_detail.get("mtc_gate")
+                            if md:
+                                md["original_action"] = mtc_outcome.action
+                                md["action"] = "ENTER"
+                        except Exception:
+                            pass
+        except Exception as e:  # pragma: no cover
+            logger.debug("MTC gate error: {}", e)
+        # ------------------------------------------------------------------
+        # Sprint 31 Meta Probability Gate (after MTC, before quality gates)
+        # ------------------------------------------------------------------
+        try:
+            meta_cfg = (self.settings.get('meta_scorer') or {}) if isinstance(self.settings, dict) else {}
+            if final_decision.decision in ("LONG","SHORT") and meta_cfg.get('enabled', True):
+                # Build minimal feature bundle from existing feature dict (flatten simple numeric attrs)
+                bundle = {}
+                try:
+                    for k,v in (features or {}).items():
+                        if v is None: continue
+                        # If object has a dict-like or simple attributes, extract whitelisted numeric fields
+                        if isinstance(v, (int,float)):
+                            bundle[k]=v
+                        else:
+                            for attr in ['ema21','ema200','adx','rsi','macd_line','macd_signal','macd_hist','macd_slope','atr_percentile','bb_width','vwap','price','spread_bps','impact_50k','dr','rv_5s','volume_z']:
+                                if hasattr(v, attr):
+                                    val = getattr(v, attr)
+                                    if isinstance(val,(int,float)):
+                                        bundle[attr]=val
+                except Exception:
+                    pass
+                # Regime profile
+                regime_profile = 'trend'
+                try:
+                    reg = features.get('regime') if isinstance(features, dict) else None
+                    if reg and getattr(reg,'profile',None):
+                        regime_profile = str(getattr(reg,'profile').value)
+                except Exception:
+                    pass
+                t0 = perf_counter()
+                meta_decision = evaluate_meta_gate(final_decision.decision, regime_profile, bundle, self.settings)
+                elapsed_ms = (perf_counter()-t0)*1000.0
+                final_decision.vote_detail.setdefault('meta_gate', {
+                    'p': meta_decision.p,
+                    'action': meta_decision.action,
+                    'reason': meta_decision.reason,
+                    'threshold': meta_decision.threshold,
+                    'profile': meta_decision.profile,
+                    'elapsed_ms': round(elapsed_ms,3),
+                    'band': meta_decision.meta,
+                })
+                observe_only = bool(meta_cfg.get('shadow_mode', False))
+                final_decision.vote_detail['meta_gate']['shadow_mode'] = observe_only
+                if not observe_only:
+                    if meta_decision.action == 'VETO':
+                        final_decision.decision = 'FLAT'
+                        final_decision.vetoes.append('META_VETO')
+                        final_decision.vote_detail.setdefault('reason','META_LOW_PROB')
+                    elif meta_decision.action == 'DAMPEN':
+                        # apply size / stop adjustments if risk model computed later
+                        final_decision.vote_detail['meta_gate']['size_mult'] = meta_decision.size_mult
+                        final_decision.vote_detail['meta_gate']['widen_stop_mult'] = meta_decision.widen_stop_mult
+                else:
+                    # Normalize action in shadow mode for downstream compatibility
+                    final_decision.vote_detail['meta_gate']['original_action'] = meta_decision.action
+                    final_decision.vote_detail['meta_gate']['action'] = 'ENTER'
+        except Exception as e:  # pragma: no cover
+            logger.debug('Meta gate error: {}', e)
+        # Sprint 43 — Regime snapshot injection for downstream transports (Telegram, logs)
+        try:
+            reg_obj = feature_vector.regime if hasattr(feature_vector, 'regime') else None
+            if reg_obj:
+                final_decision.vote_detail.setdefault('regime', {})
+                vd = final_decision.vote_detail['regime']
+                for attr in [
+                    'regime_label','regime_probs','transition_hazard','exp_vol_h','dir_bias',
+                    'macro_risk_context','sent_extreme_flag','whale_pressure'
+                ]:
+                    val = getattr(reg_obj, attr, None)
+                    if val is not None:
+                        vd[attr] = val
+        except Exception:
+            pass
+        # ------------------------------------------------------------------
         # Sprint 18 Quality Gates (Confidence Binning + Targeted Vetoes)
         # Execute AFTER playbook selection (need expected RR) and BEFORE sizing.
         # ------------------------------------------------------------------
@@ -506,6 +812,37 @@ class RealSignalEngine:
                     final_decision.vote_detail.setdefault("quality_size_mult", qd.size_multiplier)
         except Exception as e:
             logger.debug("Quality gates integration error: {}", e)
+
+        # ------------------------------------------------------------------
+        # Sprint 28 Event Gate (macro / crypto incidents)
+        # Executed AFTER quality gates but BEFORE legacy news/vol veto system so
+        # newer event_risk can supersede older simplistic news_veto.
+        # ------------------------------------------------------------------
+        try:
+            if final_decision.decision in ("LONG","SHORT"):
+                pre = final_decision.decision  # capture before gate
+                gate = events.evaluate_gate(symbol, ts_epoch*1000, None, None, self.settings)
+                if gate.action == 'VETO':
+                    final_decision.vote_detail.setdefault('event_gate', gate.__dict__)
+                    final_decision.vote_detail['event_gate']['pre_decision'] = pre
+                    final_decision.vote_detail['event_gate']['force_close'] = gate.force_close
+                    final_decision.decision = 'FLAT'
+                    final_decision.vetoes.append(f"NEWS_VETO:{gate.category or gate.reason}")
+                    final_decision.vote_detail.setdefault('reason', f"NEWS_VETO:{gate.category or gate.reason}")
+                elif gate.action == 'DAMPEN':
+                    final_decision.vote_detail.setdefault('event_gate', gate.__dict__)
+                    final_decision.vote_detail['event_gate']['pre_decision'] = pre
+                    # widen stop if risk_model already present
+                    try:
+                        if gate.widen_stop_mult and final_decision.vote_detail.get('risk_model'):
+                            rm = final_decision.vote_detail['risk_model']
+                            if rm.get('stop_loss') and rm.get('atr'):
+                                rm['stop_loss'] = rm['stop_loss'] * float(gate.widen_stop_mult)
+                                rm['event_gate_stop_widened'] = gate.widen_stop_mult
+                    except Exception:
+                        pass
+        except Exception as e:  # pragma: no cover
+            logger.debug("Event gate integration error: {}", e)
 
         # ------------------------------------------------------------------
         # Sprint 16: News & Volatility Veto System
@@ -632,6 +969,88 @@ class RealSignalEngine:
         except Exception as e:
             logger.debug("Vol/News veto integration error: {}", e)
 
+        # ------------------------------------------------------------------
+        # Sprint 29 Liquidity / Microstructure Gate
+        # Executed AFTER news/vol veto but BEFORE sizing so size / stops can
+        # be modified. We evaluate gate -> if VETO convert to FLAT + mark
+        # veto code; if DAMPEN store modifiers to apply post sizing.
+        # ------------------------------------------------------------------
+        lq_gate_outcome = None
+        try:
+            if final_decision.decision in ("LONG", "SHORT"):
+                # Determine regime profile mapping (trend/mean_revert/chop)
+                profile = "trend"
+                try:
+                    reg_obj = features.get("regime") if isinstance(features, dict) else None
+                    if reg_obj and getattr(reg_obj, "profile", None):
+                        profile = str(getattr(reg_obj, "profile").value)
+                except Exception:
+                    pass
+                # Acquire BookHealth snapshot if FeatureStore exposes it; else None (gate will apply missing policy)
+                book = None
+                try:
+                    get_bh = getattr(self.feature_store, "get_latest_book_health", None)
+                    if callable(get_bh):
+                        book = get_bh(symbol)
+                except Exception:
+                    book = None
+                lq_gate_outcome = liquidity_gate.evaluate_gate(symbol, ts_epoch, profile, book, self.settings, getattr(self, "_lq_gate", None))
+                # Persist decision (best-effort)
+                try:
+                    if lq_gate_outcome:
+                        from ultra_signals.persist.db import record_liquidity_decision  # local import to avoid circulars
+                        meta = dict(lq_gate_outcome.meta or {})
+                        # augment meta with raw metrics if BookHealth present
+                        if book is not None:
+                            try:
+                                meta.setdefault('spread_bps', getattr(book, 'spread_bps', None))
+                                meta.setdefault('impact_50k', getattr(book, 'impact_50k', None))
+                                meta.setdefault('dr', getattr(book, 'dr', None))
+                                meta.setdefault('rv_5s', getattr(book, 'rv_5s', None))
+                                meta.setdefault('source', getattr(book, 'source', None))
+                            except Exception:
+                                pass
+                        record_liquidity_decision(symbol, ts_epoch, profile, lq_gate_outcome.action, lq_gate_outcome.reason, meta)
+                except Exception:
+                    pass
+                if lq_gate_outcome.action == "VETO":
+                    final_decision.decision = "FLAT"
+                    code = f"LQ_VETO:{lq_gate_outcome.reason}" if lq_gate_outcome.reason else "LQ_VETO"
+                    final_decision.vetoes.append(code)
+                    final_decision.vote_detail.setdefault("liquidity_gate", lq_gate_outcome.__dict__)
+                    final_decision.vote_detail.setdefault("reason", code)
+                elif lq_gate_outcome.action == "DAMPEN":
+                    final_decision.vote_detail.setdefault("liquidity_gate", lq_gate_outcome.__dict__)
+                else:
+                    # still record a NONE outcome for telemetry consistency
+                    final_decision.vote_detail.setdefault("liquidity_gate", lq_gate_outcome.__dict__)
+        except Exception as e:  # pragma: no cover
+            logger.debug("Liquidity gate error: {}", e)
+
+        # ------------------------------------------------------------------
+        # Sprint 41 Whale / Smart Money Gate (after liquidity, before sizing)
+        # ------------------------------------------------------------------
+        whale_gate_outcome = None
+        try:
+            if final_decision.decision in ("LONG", "SHORT"):
+                wf_obj = features.get('whales') if isinstance(features, dict) else None
+                if wf_obj is not None:
+                    whale_gate_outcome = evaluate_whale_gate(wf_obj, self.settings)
+                    # Record outcome
+                    final_decision.vote_detail.setdefault('whale_gate', {
+                        'action': getattr(whale_gate_outcome, 'action', None),
+                        'reason': getattr(whale_gate_outcome, 'reason', None),
+                        'size_mult': getattr(whale_gate_outcome, 'size_mult', None),
+                        'meta': getattr(whale_gate_outcome, 'meta', None),
+                    })
+                    if whale_gate_outcome.action == 'VETO':
+                        final_decision.decision = 'FLAT'
+                        code = f"WHALE_VETO:{whale_gate_outcome.reason}" if whale_gate_outcome.reason else 'WHALE_VETO'
+                        final_decision.vetoes.append(code)
+                        final_decision.vote_detail.setdefault('reason', code)
+        except Exception as e:  # pragma: no cover
+            logger.debug('Whale gate error: {}', e)
+
         # 7) Adaptive sizing & risk model (Sprint 12)
         try:
             if final_decision.decision in ("LONG", "SHORT"):
@@ -660,6 +1079,47 @@ class RealSignalEngine:
                         "risk_pct": risk_decision.reasoning.get("risk_pct"),
                     })
                     logger.debug("Risk Model Decision: {}", final_decision.vote_detail["risk_model"])
+                    # Sprint 34 adaptive exits overlay (non-destructive)
+                    try:
+                        from ultra_signals.engine.adaptive_exits import generate_adaptive_exits
+                        # Build minimal ohlcv tail: attempt to pull from feature_store (last atr_lookback*2 bars)
+                        ae_cfg = ((self.settings.get('risk') or {}).get('adaptive_exits') or {})
+                        lookback = int(ae_cfg.get('atr_lookback', 14)) * 3
+                        ohlcv_tail = None
+                        try:
+                            get_hist = getattr(self.feature_store, 'get_ohlcv_history', None)
+                            if callable(get_hist):
+                                ohlcv_tail = get_hist(symbol, tf, lookback)
+                        except Exception:
+                            ohlcv_tail = None
+                        regime_info = {}
+                        try:
+                            reg_obj = features.get('regime') if isinstance(features, dict) else None
+                            if reg_obj is not None:
+                                regime_info = {
+                                    'profile': getattr(reg_obj, 'profile', None).value if getattr(reg_obj, 'profile', None) else getattr(reg_obj,'profile', None),
+                                    'vol_state': getattr(reg_obj, 'vol_state', None).value if getattr(reg_obj, 'vol_state', None) else getattr(reg_obj,'vol_state', None),
+                                    'tf': tf,
+                                }
+                        except Exception:
+                            regime_info = {'tf': tf}
+                        exits = generate_adaptive_exits(symbol, final_decision.decision, float(feature_vector.ohlcv.get('close',0.0)), ohlcv_tail, regime_info, self.settings, atr_current=risk_decision.atr)
+                        if exits:
+                            final_decision.vote_detail.setdefault('adaptive_exits', exits)
+                            # Optionally override base stop/tp only if config enabled & more conservative (stop tighter) or more expansive target
+                            try:
+                                rm = final_decision.vote_detail.get('risk_model')
+                                if rm and exits.get('stop_price') and exits.get('target_price'):
+                                    # Replace if different; keep original under shadow keys
+                                    rm.setdefault('orig_stop_loss', rm.get('stop_loss'))
+                                    rm.setdefault('orig_take_profit', rm.get('take_profit'))
+                                    rm['stop_loss'] = exits['stop_price']
+                                    rm['take_profit'] = exits['target_price']
+                                    rm['adaptive_applied'] = True
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
 
                     # Apply playbook size_scale (Sprint17) if plan present
                     try:
@@ -682,6 +1142,117 @@ class RealSignalEngine:
                         final_decision.vote_detail["risk_model"]["quality_size_mult"] = q_mult
                     except Exception:
                         pass
+
+                # Sprint 45: Apply behavioral size multiplier AFTER quality scaling but BEFORE meta/mtc/liquidity layering
+                try:
+                    b_mult = float(final_decision.vote_detail.get('behavior_size_mult', 1.0))
+                    if b_mult != 1.0 and final_decision.vote_detail.get('risk_model'):
+                        base_sz = final_decision.vote_detail['risk_model']['position_size']
+                        final_decision.vote_detail['risk_model']['position_size'] = round(base_sz * b_mult,2)
+                        final_decision.vote_detail['risk_model']['behavior_scaled'] = True
+                        final_decision.vote_detail['risk_model']['behavior_size_mult'] = b_mult
+                except Exception:
+                    pass
+
+                # Sprint 31: Meta gate partial dampen (apply AFTER quality scaling, BEFORE MTC)
+                try:
+                    mg = final_decision.vote_detail.get("meta_gate")
+                    if mg and mg.get("action") == "DAMPEN" and final_decision.vote_detail.get("risk_model"):
+                        size_mult = float(mg.get("size_mult") or 1.0)
+                        widen_mult = float(mg.get("widen_stop_mult") or 1.0)
+                        if 0 < size_mult < 1.0:
+                            base_sz = final_decision.vote_detail["risk_model"]["position_size"]
+                            final_decision.vote_detail["risk_model"]["position_size"] = round(base_sz * size_mult, 2)
+                            final_decision.vote_detail["risk_model"]["meta_scaled"] = True
+                            final_decision.vote_detail["risk_model"]["meta_size_mult"] = size_mult
+                        if widen_mult > 1.0 and final_decision.vote_detail["risk_model"].get("stop_loss"):
+                            final_decision.vote_detail["risk_model"]["stop_loss"] = final_decision.vote_detail["risk_model"]["stop_loss"] * widen_mult
+                            final_decision.vote_detail["risk_model"]["meta_stop_widen"] = widen_mult
+                except Exception:
+                    pass
+
+                # Sprint 30: MTC partial dampen (apply AFTER quality scaling, BEFORE liquidity)
+                try:
+                    mtc = final_decision.vote_detail.get("mtc_gate")
+                    if mtc and mtc.get("action") == "DAMPEN" and final_decision.vote_detail.get("risk_model"):
+                        mtc_cfg = (self.settings.get("mtc") or {}).get("actions", {})
+                        partial_cfg = (mtc_cfg.get("partial") or {})
+                        size_mult = float(partial_cfg.get("size_mult", 0.6))
+                        widen_mult = float(partial_cfg.get("widen_stop_mult", 1.10))
+                        if 0 < size_mult < 1.0:
+                            base_sz = final_decision.vote_detail["risk_model"]["position_size"]
+                            final_decision.vote_detail["risk_model"]["position_size"] = round(base_sz * size_mult, 2)
+                            final_decision.vote_detail["risk_model"]["mtc_scaled"] = True
+                            final_decision.vote_detail["risk_model"]["mtc_size_mult"] = size_mult
+                        if widen_mult > 1.0 and final_decision.vote_detail["risk_model"].get("stop_loss"):
+                            final_decision.vote_detail["risk_model"]["stop_loss"] = final_decision.vote_detail["risk_model"]["stop_loss"] * widen_mult
+                            final_decision.vote_detail["risk_model"]["mtc_stop_widen"] = widen_mult
+                except Exception:
+                    pass
+
+                # Apply liquidity gate dampen AFTER quality scaling but BEFORE event gate dampen (multiplicative layering)
+                try:
+                    lq = final_decision.vote_detail.get("liquidity_gate")
+                    if lq and lq.get("action") == "DAMPEN" and final_decision.vote_detail.get("risk_model"):
+                        mult = float(lq.get("size_mult") or 1.0)
+                        if 0 < mult < 1.0:
+                            base_sz = final_decision.vote_detail["risk_model"]["position_size"]
+                            final_decision.vote_detail["risk_model"]["position_size"] = round(base_sz * mult, 2)
+                            final_decision.vote_detail["risk_model"]["lq_gate_scaled"] = True
+                            final_decision.vote_detail["risk_model"]["lq_size_mult"] = mult
+                        # widen stop
+                        widen = float(lq.get("widen_stop_mult") or 1.0)
+                        if widen > 1.0 and final_decision.vote_detail["risk_model"].get("stop_loss"):
+                            final_decision.vote_detail["risk_model"]["stop_loss"] = final_decision.vote_detail["risk_model"]["stop_loss"] * widen
+                            final_decision.vote_detail["risk_model"]["lq_stop_widen"] = widen
+                        # maker-only propagation (adjust playbook/plan if exists)
+                        if lq.get("maker_only") and isinstance(final_decision.vote_detail.get("playbook"), dict):
+                            try:
+                                pb = final_decision.vote_detail.get("playbook")
+                                if pb.get("entry_type") == "market":
+                                    pb["entry_type"] = "maker"
+                                    pb["maker_from_lq_gate"] = True
+                            except Exception:
+                                pass
+                    elif lq and lq.get("maker_only") and isinstance(final_decision.vote_detail.get("playbook"), dict):
+                        # Even if action NONE but maker_only flag (future config) -> propagate
+                        try:
+                            pb = final_decision.vote_detail.get("playbook")
+                            if pb.get("entry_type") == "market":
+                                pb["entry_type"] = "maker"
+                                pb["maker_from_lq_gate"] = True
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Apply whale gate size modulation AFTER liquidity gate scaling (multiplicative) but BEFORE event gate scaling
+                try:
+                    wg = final_decision.vote_detail.get('whale_gate')
+                    if wg and wg.get('action') in ('DAMPEN','BOOST') and final_decision.vote_detail.get('risk_model'):
+                        mult = float(wg.get('size_mult') or 1.0)
+                        # Allow >1 (boost) or <1 (dampen), guard extremes
+                        if mult > 0 and mult != 1.0:
+                            base_sz = final_decision.vote_detail['risk_model']['position_size']
+                            capped_mult = min(mult, 2.5)  # cap boost to 2.5x for safety
+                            final_decision.vote_detail['risk_model']['position_size'] = round(base_sz * capped_mult, 2)
+                            final_decision.vote_detail['risk_model']['whale_scaled'] = True
+                            final_decision.vote_detail['risk_model']['whale_size_mult'] = capped_mult
+                except Exception:
+                    pass
+
+                # Apply event gate dampen AFTER quality scaling (so multiplicative)
+                try:
+                    eg = final_decision.vote_detail.get('event_gate')
+                    if eg and eg.get('action') == 'DAMPEN' and final_decision.vote_detail.get('risk_model'):
+                        mult = float(eg.get('size_mult') or 1.0)
+                        if 0 < mult < 1.0:
+                            base_sz = final_decision.vote_detail['risk_model']['position_size']
+                            final_decision.vote_detail['risk_model']['position_size'] = round(base_sz * mult, 2)
+                            final_decision.vote_detail['risk_model']['event_gate_scaled'] = True
+                            final_decision.vote_detail['risk_model']['event_gate_mult'] = mult
+                except Exception:
+                    pass
 
                 # Sprint 15 Dynamic Position Sizing overlay (independent of adaptive model for now)
                 ps_cfg = (self.settings.get("position_sizing") or {}) if isinstance(self.settings, dict) else {}
@@ -768,10 +1339,275 @@ class RealSignalEngine:
                                         final_decision.vote_detail["position_sizer"]["size_scale_playbook"] = plan_pb["size_scale"]
                                 except Exception:
                                     pass
+
+                                # Apply meta gate dampen to position_sizer result (multiplicative) if present
+                                try:
+                                    mg = final_decision.vote_detail.get("meta_gate")
+                                    if mg and mg.get("action") == "DAMPEN":
+                                        size_mult = float(mg.get("size_mult") or 1.0)
+                                        if 0 < size_mult < 1.0:
+                                            base_sz = final_decision.vote_detail["position_sizer"]["size_quote"]
+                                            final_decision.vote_detail["position_sizer"]["size_quote"] = round(base_sz * size_mult, 2)
+                                            final_decision.vote_detail["position_sizer"]["meta_scaled"] = True
+                                            final_decision.vote_detail["position_sizer"]["meta_size_mult"] = size_mult
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
+
+                # Sprint 32 Advanced Sizer (after legacy risk_model & overlays so it can override quantity logic cleanly)
+                try:
+                    sizer_cfg = (self.settings.get('sizer') or {}) if isinstance(self.settings, dict) else {}
+                    if getattr(self._adv_sizer, 'enabled', False) and final_decision.decision in ("LONG","SHORT") and sizer_cfg.get('enabled', True):
+                        # collect inputs
+                        p_meta = None
+                        try:
+                            mg = final_decision.vote_detail.get('meta_gate')
+                            if mg:
+                                p_meta = mg.get('p')
+                        except Exception:
+                            pass
+                        mtc_status = None
+                        try:
+                            mtc = final_decision.vote_detail.get('mtc_gate')
+                            if mtc:
+                                mtc_status = mtc.get('status')
+                        except Exception:
+                            pass
+                        lq_action = None
+                        try:
+                            lq = final_decision.vote_detail.get('liquidity_gate')
+                            if lq:
+                                lq_action = lq.get('action')
+                        except Exception:
+                            pass
+                        atr_val = None
+                        try:
+                            vol_obj = features.get('volatility')
+                            if vol_obj:
+                                atr_val = getattr(vol_obj,'atr', None)
+                        except Exception:
+                            pass
+                        # drawdown placeholder (need equity peak tracking; use 0 for now)
+                        drawdown = 0.0
+                        adv_res = self._adv_sizer.compute(symbol, final_decision.decision, float(feature_vector.ohlcv.get('close',0.0)), equity, {
+                            'p_meta': p_meta,
+                            'mtc_status': mtc_status,
+                            'liquidity_gate_action': lq_action,
+                            'atr': atr_val,
+                            'stop_distance': None,
+                            'drawdown': drawdown,
+                            'open_positions': [],  # live path lacks portfolio book; integrate later
+                        })
+                        final_decision.vote_detail.setdefault('advanced_sizer', adv_res.breakdown)
+                        # Record advisory sizing fields
+                        if final_decision.vote_detail.get('risk_model'):
+                            price_cur = float(feature_vector.ohlcv.get('close',0.0))
+                            notional = adv_res.qty * price_cur if adv_res.qty>0 else 0.0
+                            rm = final_decision.vote_detail['risk_model']
+                            rm['position_size_adv'] = round(notional,2)
+                            rm['adv_qty'] = adv_res.qty
+                            rm['adv_risk_pct'] = adv_res.risk_pct_effective
+                        # Optional live enforcement toggle
+                        if sizer_cfg.get('enforce_live'):
+                            if adv_res.qty <= 0:
+                                # veto trade (size zero)
+                                final_decision.decision = 'FLAT'
+                                final_decision.vetoes.append('ADV_SIZER_ZERO')
+                                final_decision.vote_detail.setdefault('reason','ADV_SIZER_ZERO')
+                            else:
+                                # Override existing risk_model position_size with advanced sizing notional
+                                if final_decision.vote_detail.get('risk_model'):
+                                    final_decision.vote_detail['risk_model']['position_size'] = round(adv_res.qty * float(feature_vector.ohlcv.get('close',0.0)),2)
+                                    final_decision.vote_detail['risk_model']['enforced_adv'] = True
+                except Exception:
+                    pass
         except Exception as e:
             logger.exception("Adaptive sizing error: {}", e)
+
+        # ---------------- Sprint 33 Portfolio Risk Allocation (pre-beta gating but after advanced sizing) ----------------
+        try:
+            pr_cfg = (self.settings.get('portfolio_risk') or {}) if isinstance(self.settings, dict) else {}
+            if pr_cfg.get('enabled') and RiskEstimator and PortfolioAllocator and final_decision.decision in ("LONG","SHORT"):
+                # Lazy init estimator & allocator
+                if not hasattr(self, '_pr_est'):
+                    self._pr_est = RiskEstimator(self.settings)
+                    self._pr_alloc = PortfolioAllocator(self.settings, self._pr_est)
+                    self._pr_bar_counter = 0
+                # Update estimator with this bar (needs high/low/close). Use ohlcv_segment last row.
+                try:
+                    bar_row = ohlcv_segment.iloc[-1].to_dict()
+                    self._pr_est.update(symbol, bar_row, ts_epoch)
+                except Exception:
+                    pass
+                # Build candidate structure if advanced_sizer produced risk_amount
+                adv = final_decision.vote_detail.get('advanced_sizer') if isinstance(final_decision.vote_detail, dict) else {}
+                risk_amt = float(adv.get('risk_amount', 0.0)) if adv else 0.0
+                stop_dist = float(adv.get('stop_distance', 0.0)) if adv else None
+                price_now = float(feature_vector.ohlcv.get('close',0.0)) if feature_vector and feature_vector.ohlcv else 0.0
+                qty = float(adv.get('qty', 0.0)) if adv else 0.0
+                candidate = {
+                    'symbol': symbol,
+                    'side': final_decision.decision,
+                    'risk_amount': risk_amt,
+                    'stop_distance': stop_dist or 0.0,
+                    'price': price_now,
+                    'qty': qty,
+                }
+                # TODO: incorporate real open positions book; placeholder empty list for now
+                open_positions = getattr(self, '_external_open_positions', []) or []
+                adjustments, metrics = self._pr_alloc.evaluate(open_positions, candidate, ts_epoch)
+                if adjustments:
+                    for adj in adjustments:
+                        if adj['symbol'] == symbol:
+                            if adj['action'] == 'reject':
+                                final_decision.decision = 'FLAT'
+                                final_decision.vetoes.append('PR_VETO')
+                                final_decision.vote_detail.setdefault('reason','PR_VETO')
+                            elif adj['action'] == 'scale' and adj['size_mult']>0 and final_decision.vote_detail.get('risk_model'):
+                                try:
+                                    rm = final_decision.vote_detail['risk_model']
+                                    rm['position_size'] = round(rm['position_size'] * adj['size_mult'],2)
+                                    rm['pr_scaled'] = True
+                                    rm['pr_size_mult'] = adj['size_mult']
+                                except Exception:
+                                    pass
+                final_decision.vote_detail.setdefault('portfolio_risk', {})
+                final_decision.vote_detail['portfolio_risk'].update({'adjustments': adjustments, 'metrics': metrics})
+                # Record metrics timeseries if present
+                if metrics:
+                    row = dict(metrics)
+                    row['ts'] = ts_epoch
+                    row['symbol'] = symbol
+                    try:
+                        self._pr_metrics_ts.append(row)
+                    except Exception:
+                        pass
+        except Exception as e:  # pragma: no cover
+            logger.debug('Portfolio risk allocation error: {}', e)
+
+        # Sprint 22: Pre-trade beta/cluster gating (only if decision still active LONG/SHORT)
+        if self._ph_enabled and final_decision and final_decision.decision in ("LONG", "SHORT"):
+            try:
+                ph_cfg = self.settings.get("portfolio_hedge", {}) if isinstance(self.settings, dict) else {}
+                # proposed notional from risk_model / position_sizer
+                notional = None
+                rm = final_decision.vote_detail.get("risk_model") if isinstance(final_decision.vote_detail, dict) else None
+                if rm:
+                    notional = rm.get("position_size")
+                if notional is None:
+                    ps = final_decision.vote_detail.get("position_sizer") if isinstance(final_decision.vote_detail, dict) else None
+                    if ps:
+                        notional = ps.get("size_quote")
+                if notional is None:
+                    notional = 0.01 * self._ph_equity  # fallback
+                side_sign = 1.0 if final_decision.decision == "LONG" else -1.0
+                preview = self._ph_caps.preview_beta_after_trade(
+                    symbol=symbol,
+                    add_notional=side_sign * float(notional),
+                    equity=self._ph_equity,
+                    exposure_symbols=self._ph_exposure.symbol_notionals,
+                    betas=self._ph_corr.betas,
+                    cluster_map=self._ph_exposure.cluster_map,
+                )
+                cluster_veto = self._ph_caps.check_cluster_caps(
+                    symbol=symbol,
+                    add_notional=side_sign * float(notional),
+                    equity=self._ph_equity,
+                    exposure_symbols=self._ph_exposure.symbol_notionals,
+                    cluster_map=self._ph_exposure.cluster_map,
+                )
+                if cluster_veto:
+                    final_decision.decision = "FLAT"
+                    final_decision.vetoes.append("VETO_CLUSTER_CAP")
+                    final_decision.vote_detail.setdefault("reason", "VETO_CLUSTER_CAP")
+                elif not preview.allowed:
+                    final_decision.decision = "FLAT"
+                    if preview.veto_reason:
+                        final_decision.vetoes.append("VETO_" + preview.veto_reason)
+                        final_decision.vote_detail.setdefault("reason", preview.veto_reason)
+                else:
+                    if abs(preview.scaled_notional - side_sign * float(notional)) > 1e-6:
+                        scale = abs(preview.scaled_notional) / (abs(float(notional)) or 1.0)
+                        if rm and rm.get("position_size"):
+                            rm["position_size"] = round(float(rm["position_size"]) * scale, 2)
+                            rm["beta_scaled"] = True
+                        ps = final_decision.vote_detail.get("position_sizer")
+                        if ps and ps.get("size_quote"):
+                            ps["size_quote"] = round(float(ps["size_quote"]) * scale, 2)
+                            ps["beta_scaled"] = True
+                        final_decision.vote_detail.setdefault("beta_preview", {})
+                        final_decision.vote_detail["beta_preview"].update({"projected_beta": round(preview.projected_beta, 4), "scaled": True})
+                    else:
+                        final_decision.vote_detail.setdefault("beta_preview", {})
+                        final_decision.vote_detail["beta_preview"].update({"projected_beta": round(preview.projected_beta, 4), "scaled": False})
+            except Exception as e:  # pragma: no cover
+                logger.debug("Portfolio beta gating error: {}", e)
+
+        # Sprint 22: Hedge plan (informational until execution layer consumes)
+        if self._ph_enabled:
+            try:
+                beta_p = self._ph_corr.portfolio_beta(self._ph_exposure.symbol_notionals, self._ph_equity)
+                # dynamic beta target (leader bias) if configured
+                beta_target = 0.0
+                try:
+                    lb = getattr(self, "_ph_bias_cfg", {}) or {}
+                    if lb.get("enabled", False):
+                        # Use correlation regime + leader trend slope for directional bias
+                        if self._ph_corr.high_corr_regime:
+                            # leader features
+                            leader_feats = features if symbol == self._ph_corr.leader else self._get_features_robust(self._ph_corr.leader, timestamp, tf)
+                            trend_block = leader_feats.get("trend") if isinstance(leader_feats, dict) else None
+                            slope = None
+                            try:
+                                slope = getattr(trend_block, "slope", None) or getattr(trend_block, "trend_slope", None)
+                            except Exception:
+                                slope = None
+                            try:
+                                slope = float(slope) if slope is not None else 0.0
+                            except Exception:
+                                slope = 0.0
+                            bias_long = float(lb.get("bias_long", 0.05))
+                            bias_short = float(lb.get("bias_short", -0.05))
+                            if slope and slope > 0:
+                                beta_target = bias_long
+                            elif slope and slope < 0:
+                                beta_target = bias_short
+                except Exception:
+                    beta_target = 0.0
+                plan = self._ph_hedger.compute_plan(bar_index=int(ts_epoch), portfolio_beta=beta_p, equity=self._ph_equity, beta_target=beta_target)
+                final_decision.vote_detail.setdefault("hedger", {})
+                final_decision.vote_detail["hedger"].update({
+                    "beta_p": round(beta_p, 4),
+                    "action": plan.action,
+                    "reason": plan.reason,
+                    "hedge_notional_target": round(plan.target_notional, 2),
+                    "beta_target": round(beta_target, 4),
+                })
+                self._ph_report.record(HedgeSnapshot(ts=int(ts_epoch), beta_p=beta_p, hedge_notional=self._ph_hedger.current_hedge_notional, action=plan.action, reason=plan.reason))
+            except Exception as e:  # pragma: no cover
+                logger.debug("Hedge plan compute error: {}", e)
+
+        # High-correlation quality gate (simplified): if regime high correlation AND projected beta would push further outside band AND confidence low -> veto
+        if self._ph_enabled and hasattr(self, "_ph_corr") and self._ph_corr.high_corr_regime:
+            try:
+                hedger_band = getattr(self._ph_hedger, "beta_band", (-0.15, 0.15))
+                beta_p_now = self._ph_corr.portfolio_beta(self._ph_exposure.symbol_notionals, self._ph_equity)
+                conf = float(getattr(final_decision, "confidence", 0.0) or 0.0)
+                # If low confidence (<0.25) and already outside 120% of band width in direction of trade, veto
+                band_min, band_max = hedger_band
+                band_width = band_max - band_min
+                if conf < 0.25:
+                    if final_decision.decision == "LONG" and beta_p_now > band_max + 0.2 * band_width:
+                        final_decision.vetoes.append("VETO_HIGH_CORR_QUALITY")
+                        final_decision.decision = "FLAT"
+                        final_decision.vote_detail.setdefault("reason", "HIGH_CORR_QG")
+                    elif final_decision.decision == "SHORT" and beta_p_now < band_min - 0.2 * band_width:
+                        final_decision.vetoes.append("VETO_HIGH_CORR_QUALITY")
+                        final_decision.decision = "FLAT"
+                        final_decision.vote_detail.setdefault("reason", "HIGH_CORR_QG")
+            except Exception:
+                pass
 
         return final_decision
 

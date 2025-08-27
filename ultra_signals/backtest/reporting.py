@@ -36,6 +36,25 @@ class ReportGenerator:
         # 3) Save trades CSV
         self._save_trades_csv(trades)
 
+        # 3b) Advanced sizer visualization artifacts (if fields present)
+        try:
+            if trades is not None and not trades.empty:
+                # Attempt to extract adv_risk_pct, meta_p, R
+                cols = trades.columns
+                adv_col = 'adv_risk_pct' if 'adv_risk_pct' in cols else None
+                meta_col = 'meta_p' if 'meta_p' in cols else None
+                r_col = 'R' if 'R' in cols else ('rr' if 'rr' in cols else None)
+                if adv_col and trades[adv_col].notna().any():
+                    self._plot_adv_size_dist(trades[adv_col].astype(float))
+                if adv_col and meta_col and trades[meta_col].notna().any():
+                    self._plot_conviction_corr(trades[meta_col].astype(float), trades[adv_col].astype(float))
+                if adv_col and r_col and trades[r_col].notna().any():
+                    self._plot_size_vs_R(trades[adv_col].astype(float), trades[r_col].astype(float))
+                # Clamp metrics summary appended
+                self._append_clamp_metrics(trades)
+        except Exception:
+            pass
+
         # 4) Optionally save RiskEvents + append top reasons to summary
         if risk_events:
             df = self._risk_events_to_df(risk_events)
@@ -61,6 +80,19 @@ class ReportGenerator:
                     f.write(f"{key}: {value:.2f}\n")
                 else:
                     f.write(f"{key}: {value}\n")
+        # Also emit a markdown version (report.md) for downstream batch parser expectations
+        md_path = self.output_dir / "report.md"
+        try:
+            with open(md_path, "w") as md:
+                md.write("# Backtest Report\n\n")
+                md.write("| Metric | Value |\n|--------|-------|\n")
+                for key, value in kpis.items():
+                    if isinstance(value, float):
+                        md.write(f"| {key} | {value:.4f} |\n")
+                    else:
+                        md.write(f"| {key} | {value} |\n")
+        except Exception:
+            pass
 
     def _save_equity_curve_plot(self, equity_curve: pd.Series):
         """Generates and saves a plot of the equity curve."""
@@ -83,6 +115,104 @@ class ReportGenerator:
             return
         path = self.output_dir / "trades.csv"
         trades.to_csv(path, index=False)
+
+    # ---------------- Advanced Sizer Plots -----------------
+    def _plot_adv_size_dist(self, series: pd.Series):
+        try:
+            import matplotlib.pyplot as plt
+            plt.style.use("seaborn-v0_8-darkgrid")
+            fig, ax = plt.subplots(figsize=(8,5))
+            series.dropna().plot(kind='hist', bins=20, ax=ax, alpha=0.7, color='steelblue')
+            ax.set_title('Advanced Sizer Risk % Distribution')
+            ax.set_xlabel('Risk % of Equity')
+            ax.set_ylabel('Frequency')
+            fig.tight_layout()
+            fig.savefig(self.output_dir / 'risk_pct_dist.png')
+            plt.close(fig)
+        except Exception:
+            pass
+
+    def _plot_conviction_corr(self, meta: pd.Series, risk: pd.Series):
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            m = meta.dropna(); r = risk.loc[m.index].dropna()
+            if m.empty or r.empty:
+                return
+            # Align indexes after drops
+            idx = m.index.intersection(r.index)
+            m = m.loc[idx]; r = r.loc[idx]
+            if len(idx) < 5:
+                return
+            corr = float(np.corrcoef(m.values, r.values)[0,1]) if len(m)>1 else 0.0
+            plt.style.use('seaborn-v0_8-darkgrid')
+            fig, ax = plt.subplots(figsize=(6,5))
+            ax.scatter(m.values, r.values, alpha=0.6, s=25, color='darkorange')
+            ax.set_title(f'Meta Probability vs Risk % (corr={corr:.2f})')
+            ax.set_xlabel('Meta p')
+            ax.set_ylabel('Risk %')
+            fig.tight_layout(); fig.savefig(self.output_dir / 'conviction_corr.png'); plt.close(fig)
+        except Exception:
+            pass
+
+    def _plot_size_vs_R(self, risk: pd.Series, r_vals: pd.Series):
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            rk = risk.dropna(); rv = r_vals.loc[rk.index].dropna()
+            if rk.empty or rv.empty:
+                return
+            idx = rk.index.intersection(rv.index)
+            rk = rk.loc[idx]; rv = rv.loc[idx]
+            if len(idx) < 5:
+                return
+            plt.style.use('seaborn-v0_8-darkgrid')
+            fig, ax = plt.subplots(figsize=(6,5))
+            ax.scatter(rk.values, rv.values, alpha=0.6, s=25, color='seagreen')
+            ax.set_title('Risk % vs R Multiple')
+            ax.set_xlabel('Risk %')
+            ax.set_ylabel('R (P/L ÷ Risk)')
+            fig.tight_layout(); fig.savefig(self.output_dir / 'size_vs_R_scatter.png'); plt.close(fig)
+        except Exception:
+            pass
+
+    def _append_clamp_metrics(self, trades: pd.DataFrame):
+        """Append clamp reason counts to summary if present (expects a 'adv_reasons' or 'reasons' column)."""
+        if trades is None or trades.empty:
+            return
+        reason_col = None
+        for c in ['adv_reasons','reasons']:
+            if c in trades.columns:
+                reason_col = c; break
+        if reason_col is None:
+            return
+        # Expect list-like or string with comma separation
+        reasons_all = []
+        for v in trades[reason_col]:
+            if v is None:
+                continue
+            if isinstance(v, list):
+                reasons_all.extend([str(x) for x in v])
+            else:
+                # Split on commas
+                try:
+                    parts = [p.strip() for p in str(v).split(',') if p.strip()]
+                    reasons_all.extend(parts)
+                except Exception:
+                    pass
+        if not reasons_all:
+            return
+        from collections import Counter
+        counts = Counter(reasons_all)
+        path = self.output_dir / 'summary.txt'
+        try:
+            with open(path,'a') as f:
+                f.write("\nClamp Reason Counts\n")
+                f.write("="*25 + "\n")
+                for reason, cnt in counts.most_common():
+                    f.write(f"- {reason}: {cnt}\n")
+        except Exception:
+            pass
 
     # ---------------- NEW: Routing audit + profile metrics ----------------
     def _save_routing_audit_csv(self, audit: pd.DataFrame):

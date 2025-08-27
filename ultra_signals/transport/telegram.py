@@ -185,6 +185,28 @@ def format_message(decision: EnsembleDecision, settings: Dict) -> str:
     # Escape for Telegram MarkdownV2 (keep * and ` intact)
     msg = _escape_markdown_v2(msg)
 
+    # Append advanced sizer compact line (added post-escape to avoid double escaping multipliers formatting)
+    try:
+        adv = None
+        if getattr(decision, 'vote_detail', None):
+            adv = decision.vote_detail.get('advanced_sizer') if isinstance(decision.vote_detail, dict) else None
+        if adv and isinstance(adv, dict) and decision.decision in ("LONG","SHORT"):
+            parts = []
+            rp = adv.get('risk_pct_effective')
+            if rp is not None:
+                parts.append(f"Sz={float(rp):.2f}%")
+            for k,label in [('conv_meta','Meta'),('conv_mtc','MTC'),('dd_mult','DD'),('kelly_mult','Kelly')]:
+                v = adv.get(k)
+                try:
+                    if v is not None:
+                        parts.append(f"{label}={float(v):.2f}")
+                except Exception:
+                    continue
+            line = " " + _escape_markdown_v2(" • ".join(parts)) + "\n"
+            msg += line
+    except Exception:
+        pass
+
     return msg
 
 

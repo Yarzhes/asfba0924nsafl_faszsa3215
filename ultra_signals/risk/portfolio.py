@@ -54,6 +54,8 @@ class Portfolio:
             stop=None,
             tp=None,
             opened_at=ts,
+            risk_amount_at_entry=None,
+            adv_stop_distance=None,
         )
 
     def close_position(self, symbol: str, price: float, ts: pd.Timestamp, reason: str = "EXIT") -> None:
@@ -67,6 +69,7 @@ class Portfolio:
         else:
             pnl = (pos.entry_price - px) * pos.size
 
+        risk_amt = getattr(pos, 'risk_amount_at_entry', None)
         trade = {
             "symbol": symbol,
             "side": pos.side,
@@ -77,7 +80,18 @@ class Portfolio:
             "exit_time": ts,
             "reason": reason,
             "bars_held": getattr(pos, "bars_held", 0),
+            "risk_amount_at_entry": risk_amt,
+            "adv_stop_distance": getattr(pos, 'adv_stop_distance', None),
         }
+        try:
+            if risk_amt and abs(risk_amt) > 1e-12:
+                trade['R'] = float(pnl) / float(risk_amt)
+        except Exception:
+            pass
+        # Sprint 30: propagate MTC gate tagging from position (if present)
+        for attr in ("mtc_status", "mtc_action", "mtc_scores", "mtc_observe_only"):
+            if hasattr(pos, attr):
+                trade[attr] = getattr(pos, attr)
         self.trades.append(trade)
 
         self.current_equity += float(pnl)

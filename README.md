@@ -153,3 +153,80 @@ ultra-signals/
 ## Change Log (Excerpt)
 
 * Sprint 19: Added walk-forward Bayesian optimization (Optuna) CLI via `cal --optimize`, composite objective, persistence of tuned settings & holdout validation.
+* Sprint 10: Regime & Market State 2.0 (hysteresis + cooldown + vol/liquidity states) integrated.
+
+## Regime & Market State (Sprint 10)
+
+The engine classifies each bar into a multi-dimensional market state that downstream components (ensemble, playbooks, sizing) consume:
+
+Primary regime: `trend`, `mean_revert`, `chop`
+Vol state: `expansion`, `crush`, `normal` (ATR percentile based)
+Liquidity: `ok`, `thin` (spread & volume z-score)
+
+### How it works
+
+1. Feature inputs: ADX, ATR percentile, EMA separation vs ATR, (optional) Bollinger Band width vs ATR, spread (bps) and volume z-score.
+2. State machine enforces:
+     - Enter / Exit thresholds (separate) for each regime.
+     - Hysteresis: regime candidate must persist N confirmations (hysteresis_hits).
+     - Cooldown: after a confirmed flip we freeze regime for `cooldown_bars` unless a strong trend override triggers.
+3. Confidence: blended normalization of ADX, ATR percentile, EMA separation.
+4. Vol state rules: ATR percentile above `expansion_atr_pct` => expansion; below `crush_atr_pct` => crush.
+5. Liquidity state: flagged thin if spread > `max_spread_bp` or volume z-score < `min_volume_z`.
+
+### Config Snippet
+
+```
+regime:
+    enabled: true
+    cooldown_bars: 8
+    strong_override: true
+    hysteresis_hits: 2
+    primary:
+        trend:
+            enter: { adx_min: 24, ema_sep_atr_min: 0.35 }
+            exit:  { adx_min: 18, ema_sep_atr_min: 0.20 }
+        mean_revert:
+            enter: { adx_max: 16, bb_width_pct_atr_max: 0.70 }
+            exit:  { adx_max: 20 }
+        chop:
+            enter: { adx_max: 20 }
+            exit:  { adx_max: 24 }
+    vol:
+        expansion_atr_pct: 0.70
+        crush_atr_pct: 0.20
+    liquidity:
+        max_spread_bp: 3.0
+        min_volume_z: -1.0
+```
+
+### Access
+
+The latest structured regime object is stored per-bar inside the FeatureStore under key `regime` and exposed in engine vote_detail as:
+
+```
+"regime": { "primary": "trend", "vol": "normal", "liq": "ok", "confidence": 0.72 }
+```
+
+You can query it directly:
+
+```python
+fs.get_regime_state(symbol, timeframe)       # latest
+fs.get_regime(symbol, timeframe, ts_ms)      # at or before timestamp
+```
+
+### Logging
+
+Each bar emits a ribbon style debug line:
+```
+[REGIME] ts=... prim=trend(0.72) vol=normal liq=ok cooldown=3/8
+```
+Cool-down progress counts down (left/total) while flips are frozen.
+
+### Ensemble Integration
+
+The ensemble automatically uses the active regime as its profile (fallback `mixed`). Thresholds like `vote_threshold`, `min_agree`, and `confidence_floor` can be provided per-regime under `ensemble`.
+
+### Testing
+
+Unit tests in `tests/test_regime_detector.py` cover trend, mean-revert, chop, vol states, liquidity, hysteresis & cooldown stability.

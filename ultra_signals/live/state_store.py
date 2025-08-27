@@ -23,7 +23,7 @@ from loguru import logger
 _DDL = [
     "PRAGMA journal_mode=WAL;",
     "CREATE TABLE IF NOT EXISTS positions (symbol TEXT PRIMARY KEY, qty REAL, avg_px REAL, ts INTEGER)",
-    "CREATE TABLE IF NOT EXISTS orders_outbox (client_order_id TEXT PRIMARY KEY, status TEXT, exchange_order_id TEXT, last_error TEXT, retries INTEGER DEFAULT 0, ts INTEGER, filled_qty REAL, exec_price REAL)",
+    "CREATE TABLE IF NOT EXISTS orders_outbox (client_order_id TEXT PRIMARY KEY, status TEXT, exchange_order_id TEXT, last_error TEXT, retries INTEGER DEFAULT 0, ts INTEGER, filled_qty REAL, exec_price REAL, venue_id TEXT, venue_order_id TEXT, parent_id TEXT)",
     "CREATE TABLE IF NOT EXISTS risk_runtime (key TEXT PRIMARY KEY, value TEXT)",
     "CREATE TABLE IF NOT EXISTS offsets (topic TEXT, symbol TEXT, timeframe TEXT, last_ts INTEGER, PRIMARY KEY(topic, symbol, timeframe))",
 ]
@@ -52,6 +52,18 @@ class StateStore:
             cur.execute("ALTER TABLE orders_outbox ADD COLUMN exec_price REAL")
         except Exception:
             pass
+        try:
+            cur.execute("ALTER TABLE orders_outbox ADD COLUMN venue_id TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE orders_outbox ADD COLUMN venue_order_id TEXT")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE orders_outbox ADD COLUMN parent_id TEXT")
+        except Exception:
+            pass
         self._conn.commit()
 
     # ---------------- Generic helpers ----------------
@@ -75,7 +87,7 @@ class StateStore:
         return {r["symbol"]: {"qty": r["qty"], "avg_px": r["avg_px"], "ts": r["ts"]} for r in cur.fetchall()}
 
     # ---------------- Orders Outbox -------------------
-    def ensure_order(self, client_order_id: str) -> bool:
+    def ensure_order(self, client_order_id: str, venue_id: str | None = None) -> bool:
         """Register an outbound order idempotently.
         Returns True if newly inserted; False if already exists.
         """
@@ -85,8 +97,8 @@ class StateStore:
             if cur.fetchone():
                 return False
             cur.execute(
-                "INSERT INTO orders_outbox(client_order_id, status, ts) VALUES(?,?,?)",
-                (client_order_id, "PENDING", int(time.time() * 1000)),
+                "INSERT INTO orders_outbox(client_order_id, status, ts, venue_id) VALUES(?,?,?,?)",
+                (client_order_id, "PENDING", int(time.time() * 1000), venue_id),
             )
             self._conn.commit()
             return True
@@ -97,6 +109,27 @@ class StateStore:
         cols = ",".join(f"{k}=?" for k in fields.keys())
         params = list(fields.values()) + [client_order_id]
         self._execute(f"UPDATE orders_outbox SET {cols} WHERE client_order_id=?", params)
+
+    def insert_child_order(self, client_order_id: str, parent_id: str, status: str = "PENDING", **extra):
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "INSERT OR REPLACE INTO orders_outbox(client_order_id,status,ts,parent_id,exchange_order_id,last_error,retries,filled_qty,exec_price,venue_id,venue_order_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    client_order_id,
+                    status,
+                    int(time.time()*1000),
+                    parent_id,
+                    extra.get('exchange_order_id'),
+                    extra.get('last_error'),
+                    extra.get('retries',0),
+                    extra.get('filled_qty'),
+                    extra.get('exec_price'),
+                    extra.get('venue_id'),
+                    extra.get('venue_order_id'),
+                )
+            )
+            self._conn.commit()
 
     def get_order(self, client_order_id: str) -> Optional[Dict[str, Any]]:
         cur = self._execute("SELECT * FROM orders_outbox WHERE client_order_id=?", (client_order_id,))

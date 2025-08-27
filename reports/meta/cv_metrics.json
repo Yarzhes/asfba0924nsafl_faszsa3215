@@ -1,0 +1,33 @@
+{
+  "model_kind": "logreg",
+  "calibration": "isotonic",
+  "cv_metrics": [
+    {
+      "fold": 0,
+      "auc_pr": 0.28535353535353536,
+      "auc_roc": 0.40740740740740744,
+      "brier": 0.23831943877471615,
+      "pos_rate": 0.25
+    },
+    {
+      "fold": 1,
+      "auc_pr": 0.125,
+      "auc_roc": 0.2222222222222222,
+      "brier": 0.3478980758399647,
+      "pos_rate": 0.1
+    },
+    {
+      "fold": 2,
+      "auc_pr": 0.125,
+      "auc_roc": 0.2222222222222222,
+      "brier": 0.5765903478024328,
+      "pos_rate": 0.1
+    }
+  ],
+  "oof_auc_pr": 0.1345516304993984,
+  "oof_auc_roc": 0.25892857142857145,
+  "oof_brier": 0.3854328676976638,
+  "rows": 34,
+  "pos_rate": 0.17647058823529413,
+  "purge_embargo": true
+}

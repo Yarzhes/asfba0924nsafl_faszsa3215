@@ -1,0 +1,8 @@
+BTCUSDT:
+  venues: { BINANCE: "BTCUSDT", BYBIT: "BTCUSDT", OKX: "BTC-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+ETHUSDT:
+  venues: { BINANCE: "ETHUSDT", BYBIT: "ETHUSDT", OKX: "ETH-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"

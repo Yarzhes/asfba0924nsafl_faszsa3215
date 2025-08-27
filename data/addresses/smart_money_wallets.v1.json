@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "generated": "2025-08-27T00:00:00Z",
+  "criteria": "curated manual seed",
+  "wallets": [
+    {"network":"ethereum","address":"0x1111111111111111111111111111111111111111","label":"proto_fund_a"}
+  ]
+}

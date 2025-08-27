@@ -277,6 +277,32 @@ def combine_subsignals(
             agree_count = 0
             confidence = 0.0
             vote_detail["reason"] = vote_detail.get("reason", "THR")
+        # Sprint 42: Macro risk-off gating (confidence dampen or veto)
+        try:
+            ca_cfg = (settings.get('cross_asset') or {}) if isinstance(settings, dict) else {}
+            if ca_cfg.get('enabled'):
+                # Macro features expected to be injected upstream (FeatureStore -> decision.vote_detail later)
+                # Here we look for a hook in settings (optional lambda) or global context (not provided yet), so we only apply thresholds if present in settings cache
+                macro_snapshot = settings.get('_latest_macro')  # optional injection point
+                if isinstance(macro_snapshot, dict):
+                    ro_prob = macro_snapshot.get('risk_off_prob')
+                    regime = macro_snapshot.get('macro_risk_regime')
+                    if ro_prob is not None and regime == 'risk_off' and decision_dir in ('LONG','SHORT'):
+                        veto_thr = float(ca_cfg.get('risk_off_veto_prob', 0.72))
+                        damp_thr = float(ca_cfg.get('risk_off_dampen_prob', 0.55))
+                        damp_mult = float(ca_cfg.get('risk_off_conf_mult', 0.6))
+                        if ro_prob >= veto_thr:
+                            vote_detail.setdefault('macro', macro_snapshot)
+                            vote_detail.setdefault('macro_action', 'VETO_RISK_OFF')
+                            decision_dir = 'FLAT'
+                            confidence = 0.0
+                            vote_detail['reason'] = 'MACRO_RISK_OFF_VETO'
+                        elif ro_prob >= damp_thr:
+                            vote_detail.setdefault('macro', macro_snapshot)
+                            vote_detail.setdefault('macro_action', 'DAMPEN_RISK_OFF')
+                            confidence *= damp_mult
+        except Exception:
+            pass
         # Sprint 14: placeholder hook for orderflow weighting (final modulation happens in real_engine currently)
         # Could multiply confidence here in future if orderflow summary passed in subsignals.
         logger.debug(

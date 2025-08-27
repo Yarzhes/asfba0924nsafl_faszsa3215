@@ -20,3 +20,9 @@ pandas_ta
 pytest-cov
 pyarrow
 optuna>=3.6.0
+fastapi==0.112.2
+uvicorn==0.30.3
+rich==13.7.1
+snscrape
+pytrends
+hmmlearn  # optional for HMM regime persistence (Sprint 43)

@@ -21,28 +21,50 @@ class _Counters:
 
 @dataclass
 class RegimeStateMachine:
+    """Small persistent state machine with hysteresis + cooldown.
+
+    Enhancements (Sprint 10 final):
+    - Tracks total cooldown (for ribbon logging denominator)
+    - Exit thresholds respected (won't flip until current regime exit conditions met)
+    """
+
     current: RegimeMode = RegimeMode.CHOP
     counters: _Counters = field(default_factory=_Counters)
     since_ts: int = 0
     last_flip_ts: int = 0
     cooldown_left: int = 0
+    cooldown_total: int = 0
 
-    def update(self, candidate: RegimeMode, hysteresis_hits: int, cooldown_bars: int, ts_bar: int, allow_override: bool, strong_flag: bool) -> RegimeMode:
+    def update(
+        self,
+        candidate: RegimeMode,
+        hysteresis_hits: int,
+        cooldown_bars: int,
+        ts_bar: int,
+        allow_override: bool,
+        strong_flag: bool,
+    ) -> RegimeMode:
+        # Cooldown freeze unless strong override permitted
         if self.cooldown_left > 0 and candidate != self.current:
             if not (allow_override and strong_flag):
                 self.cooldown_left -= 1
                 return self.current
+
+        # Increment candidate counter / decay others (soft hysteresis)
         for name in ["trend", "mean_revert", "chop"]:
             val = getattr(self.counters, name)
             if name == candidate.value:
                 setattr(self.counters, name, min(hysteresis_hits, val + 1))
             else:
                 setattr(self.counters, name, max(0, val - 1))
+
+        # Commit flip when candidate has sufficient confirmations
         if getattr(self.counters, candidate.value) >= hysteresis_hits and candidate != self.current:
             self.current = candidate
             self.last_flip_ts = ts_bar
             self.since_ts = ts_bar
             self.cooldown_left = cooldown_bars
+            self.cooldown_total = cooldown_bars
         elif candidate == self.current:
             if self.since_ts == 0:
                 self.since_ts = ts_bar
@@ -68,32 +90,92 @@ def _vol_state(atr_pct: Optional[float], crush_thr: float, expansion_thr: float)
         return VolState.EXPANSION
     return VolState.NORMAL
 
-def _primary_candidate(adx: Optional[float], atr_pct: Optional[float], ema_sep_atr: Optional[float], bb_width_pct_atr: Optional[float], cfg: Dict) -> RegimeMode:
+def _primary_candidate(
+    adx: Optional[float],
+    atr_pct: Optional[float],
+    ema_sep_atr: Optional[float],
+    bb_width_pct_atr: Optional[float],
+    cfg: Dict,
+    current: RegimeMode,
+) -> RegimeMode:
+    """Return next regime candidate honoring enter/exit hysteresis.
+
+    Logic:
+      1. Compute raw enters for each regime (independent rules).
+      2. If current regime still within its *exit* thresholds -> stay.
+      3. Else pick highest-priority satisfied enter (trend > mean_revert > chop) else fallback to chop.
+    """
     if adx is None:
-        return RegimeMode.CHOP
+        return current
     prim = cfg.get("primary", {})
-    trend_enter = prim.get("trend", {}).get("enter", {})
-    if adx >= trend_enter.get("adx_min", 24):
-        if ema_sep_atr is None or ema_sep_atr >= trend_enter.get("ema_sep_atr_min", 0.35):
-            return RegimeMode.TREND
+    # Threshold dicts
+    t_enter = prim.get("trend", {}).get("enter", {})
+    t_exit = prim.get("trend", {}).get("exit", {})
     mr_enter = prim.get("mean_revert", {}).get("enter", {})
-    if adx <= mr_enter.get("adx_max", 16):
-        if bb_width_pct_atr is None or bb_width_pct_atr <= mr_enter.get("bb_width_pct_atr_max", 0.70):
-            return RegimeMode.MEAN_REVERT
-    chop_enter = prim.get("chop", {}).get("enter", {})
-    if adx <= chop_enter.get("adx_max", 20):
+    mr_exit = prim.get("mean_revert", {}).get("exit", {})
+    c_enter = prim.get("chop", {}).get("enter", {})
+    c_exit = prim.get("chop", {}).get("exit", {})
+
+    # Helper lambdas
+    def _trend_enter() -> bool:
+        if adx < t_enter.get("adx_min", 24):
+            return False
+        if ema_sep_atr is not None and ema_sep_atr < t_enter.get("ema_sep_atr_min", 0.35):
+            return False
+        return True
+
+    def _trend_hold() -> bool:
+        # Stay in trend unless BOTH core metrics fall below exit thresholds
+        if adx >= t_exit.get("adx_min", t_enter.get("adx_min", 24) - 6):
+            return True
+        if ema_sep_atr is not None and ema_sep_atr >= t_exit.get("ema_sep_atr_min", t_enter.get("ema_sep_atr_min", 0.35) - 0.15):
+            return True
+        return False
+
+    def _mr_enter() -> bool:
+        if adx > mr_enter.get("adx_max", 16):
+            return False
+        if bb_width_pct_atr is not None and bb_width_pct_atr > mr_enter.get("bb_width_pct_atr_max", 0.70):
+            return False
+        return True
+
+    def _mr_hold() -> bool:
+        if adx <= mr_exit.get("adx_max", mr_enter.get("adx_max", 16) + 4):
+            return True
+        return False
+
+    def _chop_enter() -> bool:
+        return adx <= c_enter.get("adx_max", 20)
+
+    def _chop_hold() -> bool:
+        return adx <= c_exit.get("adx_max", c_enter.get("adx_max", 20) + 4)
+
+    # Hold logic first
+    if current == RegimeMode.TREND and _trend_hold():
+        return RegimeMode.TREND
+    if current == RegimeMode.MEAN_REVERT and _mr_hold():
+        return RegimeMode.MEAN_REVERT
+    if current == RegimeMode.CHOP and _chop_hold():
+        return RegimeMode.CHOP
+
+    # Evaluate fresh enters (priority order)
+    if _trend_enter():
+        return RegimeMode.TREND
+    if _mr_enter():
+        return RegimeMode.MEAN_REVERT
+    if _chop_enter():
         return RegimeMode.CHOP
     return RegimeMode.CHOP
 
 def _strong_override_flag(adx: Optional[float], ema_sep_atr: Optional[float], cfg: Dict) -> bool:
+    """Return True if an exceptionally strong trend should override cooldown."""
     if adx is None:
         return False
     prim = cfg.get("primary", {}).get("trend", {}).get("enter", {})
     enter_adx = prim.get("adx_min", 24)
     enter_sep = prim.get("ema_sep_atr_min", 0.35)
-    if adx >= enter_adx + 6:
-        if ema_sep_atr is None or ema_sep_atr >= enter_sep + 0.10:
-            return True
+    if adx >= enter_adx + 6 and (ema_sep_atr is None or ema_sep_atr >= enter_sep + 0.10):
+        return True
     return False
 
 def _liquidity_state(spread_bps: Optional[float], vol_z: Optional[float], cfg: Dict) -> LiquidityState:
@@ -132,7 +214,8 @@ def classify_regime_full(
     hysteresis_hits = int(cfg.get("hysteresis_hits", 2))
     cooldown_bars = int(cfg.get("cooldown_bars", 8))
     allow_override = bool(cfg.get("strong_override", True))
-    candidate = _primary_candidate(adx, atr_pct, ema_sep_atr, bb_width_pct_atr, cfg)
+    # Determine candidate honoring exit thresholds
+    candidate = _primary_candidate(adx, atr_pct, ema_sep_atr, bb_width_pct_atr, cfg, state.current)
     strong_flag = _strong_override_flag(adx, ema_sep_atr, cfg)
     now_ts = ts_bar if ts_bar is not None else int(time.time())
     committed = state.update(candidate, hysteresis_hits, cooldown_bars, now_ts, allow_override, strong_flag)
@@ -160,7 +243,7 @@ def classify_regime_full(
         liquidity=liq_state,
         confidence=conf,
         since_ts=state.since_ts or now_ts,
-        last_flip_ts=state.last_flip_ts or now_ts
+        last_flip_ts=state.last_flip_ts or now_ts,
     )
 
 _GLOBAL_STATE = RegimeStateMachine()

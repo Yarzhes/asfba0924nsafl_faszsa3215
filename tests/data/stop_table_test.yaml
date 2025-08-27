@@ -1,0 +1,10 @@
+BTCUSDT:
+  5m:
+    trend:
+      mode: atr
+      value: 1.4
+'*':
+  '*':
+    mixed:
+      mode: atr
+      value: 1.0

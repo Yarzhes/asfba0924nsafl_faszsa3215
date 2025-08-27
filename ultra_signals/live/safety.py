@@ -4,6 +4,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 from loguru import logger
+try:  # lazy import guard
+    from ultra_signals.core.alerts import publish_alert  # type: ignore
+except Exception:  # pragma: no cover
+    publish_alert = lambda *a, **k: None  # type: ignore
 
 @dataclass
 class CircuitState:
@@ -60,11 +64,19 @@ class SafetyManager:
         if self.state.paused:
             self.state = CircuitState(paused=False, reason=None, last_change_ms=int(time.time()*1000))
             logger.warning("[Safety] Resumed trading.")
+            try:
+                publish_alert('RISK_RESUME', 'Trading resumed')
+            except Exception:  # pragma: no cover
+                pass
 
     def _trip(self, reason: str):
         if not self.state.paused or self.state.reason != reason:
             self.state = CircuitState(paused=True, reason=reason, last_change_ms=int(time.time()*1000))
             logger.error(f"[Safety] Circuit breaker TRIPPED: {reason} – trading paused (fail-closed).")
+            try:
+                publish_alert('RISK_PAUSE', f'Paused due to {reason}', severity='WARN', meta={'reason': reason})
+            except Exception:  # pragma: no cover
+                pass
 
     def snapshot(self) -> Dict:
         return {

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "generated": "2025-08-27T00:00:00Z",
+  "source": "manual_seed",
+  "networks": {
+    "ethereum": {
+      "binance": ["0x0000000000000000000000000000000000000000"],
+      "okx": [],
+      "bybit": []
+    },
+    "bitcoin": {
+      "binance": ["bc1qexampleaddress"],
+      "okx": [],
+      "bybit": []
+    }
+  }
+}

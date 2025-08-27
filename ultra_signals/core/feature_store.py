@@ -23,6 +23,7 @@ import math
 import numpy as np
 import pandas as pd
 from loguru import logger
+import threading, time, os
 
 from ultra_signals.core.events import (
     BookTickerEvent,
@@ -54,6 +55,17 @@ from ultra_signals.features.volume_flow import compute_volume_flow_features
 from ultra_signals.features.alpha_v2 import compute_alpha_v2_features, build_alpha_v2_model
 from ultra_signals.features.flow_metrics import compute_flow_metrics
 from ultra_signals.core.custom_types import FlowMetricsFeatures
+from ultra_signals.features.whales import compute_whale_features
+from ultra_signals.core.custom_types import WhaleFeatures
+from ultra_signals.core.custom_types import MacroFeatures
+from ultra_signals.patterns import PatternEngine
+from ultra_signals.core.custom_types import PatternInstance
+
+# Lazy import macro engine if configured
+try:  # pragma: no cover - optional dependency path
+    from ultra_signals.macro.engine import MacroEngine
+except Exception:  # noqa
+    MacroEngine = None  # type: ignore
 
 
 def _safe_settings(d: dict, path: Tuple[str, ...], default: Any) -> Any:
@@ -111,6 +123,32 @@ class FeatureStore:
         )
         # Sprint 10 regime detector placeholder
         self._regime_detector = None
+        # Sprint 29: latest per-symbol BookHealth snapshot (raw or proxy)
+        self._latest_book_health = {}
+        # Sprint 40: latest sentiment snapshot per symbol
+        self._latest_sentiment: Dict[str, Dict[str, Any]] = {}
+        # Sprint 41: whale / smart money rolling state bucket (populated by external collectors)
+        # Structure:
+        #   exchange_flows: { 'records': [ {ts,symbol,direction,usd} ... ] }
+        #   blocks: { 'records': [ {ts,symbol,side,notional,type} ... ] }
+        #   options: { 'snapshot': { ... anomaly stats ... } }
+        #   smart_money: { 'records': [ {ts,symbol,side,usd,wallet?} ... ], 'hit_rate_30d': float }
+        self._whale_state: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        # Sprint 42 macro export buffering
+        self._macro_export_buffer: List[Dict[str, Any]] = []
+        self._macro_export_last_flush: float = time.time()
+        self._macro_export_lock = threading.Lock()
+        self._macro_export_thread: Optional[threading.Thread] = None
+        self._macro_export_stop = threading.Event()
+        try:
+            ca_cfg = ((self._settings or {}).get('cross_asset', {}) or {})
+            diag = ca_cfg.get('diagnostics') or {}
+            if ca_cfg.get('enabled') and diag.get('emit') and diag.get('async', True):
+                self._start_macro_export_thread()
+        except Exception:  # pragma: no cover
+            pass
+        # Sprint 44 pattern engine (lazy init done on first bar). Keep detectors lightweight.
+        self._pattern_engine = None  # type: ignore
 
     # -------------------------------------------------------------------------
     # Helpers: normalize timestamps and provide robust feature lookups
@@ -291,6 +329,28 @@ class FeatureStore:
                 best = series.get(k)
         return best
 
+    # ---------------- Sprint 29 BookHealth helpers -----------------
+    def set_latest_book_health(self, symbol: str, book_health: Any) -> None:
+        """Store latest BookHealth (raw feed or proxy). Lightweight, no historical retention."""
+        try:
+            self._latest_book_health[symbol] = book_health
+        except Exception:
+            pass
+
+    def get_latest_book_health(self, symbol: str):  # type: ignore[override]
+        """Return last stored BookHealth snapshot for symbol (or None)."""
+        return self._latest_book_health.get(symbol)
+
+    # ---------------- Sprint 40 Sentiment integration -----------------
+    def set_sentiment_snapshot(self, symbol: str, snapshot: Dict[str, Any]) -> None:
+        try:
+            self._latest_sentiment[symbol] = snapshot
+        except Exception:
+            pass
+
+    def get_sentiment_snapshot(self, symbol: str) -> Optional[Dict[str, Any]]:
+        return self._latest_sentiment.get(symbol)
+
     # -------------------------------------------------------------------------
 
     def _get_state(self, symbol: str, state_key: str, state_class):
@@ -391,6 +451,23 @@ class FeatureStore:
         """Computes and caches all component features for a given timestamp."""
         ohlcv = self.get_ohlcv(symbol, timeframe)
         warmup_need = _safe_settings(self._settings, ("features", "warmup_periods"), 1)
+        # Allow pattern engine to run earlier than full feature warmup (needs fewer bars)
+        if ohlcv is not None and len(ohlcv) >= 8:  # minimal bars for simple classical / compression heuristics
+            try:
+                pat_cfg = ((self._settings or {}).get('patterns', {}) or {})
+                if pat_cfg.get('enabled', True):
+                    if self._pattern_engine is None:
+                        self._pattern_engine = PatternEngine.with_default_detectors(pat_cfg)
+                    pats: list[PatternInstance] = self._pattern_engine.on_bar(symbol, timeframe, ohlcv)
+                    if pats:
+                        # store early patterns even if other feature groups absent
+                        cache = self._feature_cache.setdefault(symbol, {}).setdefault(timeframe, {})
+                        ts_early = ohlcv.index[-1]
+                        early_bucket = cache.setdefault(ts_early, {})
+                        if 'patterns' not in early_bucket:
+                            early_bucket['patterns'] = pats
+            except Exception:
+                pass
         if ohlcv is None or len(ohlcv) < warmup_need:
             return
 
@@ -492,18 +569,102 @@ class FeatureStore:
                     volume_z = getattr(feature_dict["volume_flow"], "volume_z_score", None)
                 rf = self._regime_detector.detect(fv, spread_bps=spread_bps, volume_z=volume_z)
                 feature_dict["regime"] = rf
-                cooldown = getattr(getattr(self._regime_detector, "_STATE", None), "cooldown_left", None)
-                logger.debug(
-                    "[REGIME] ts={} prim={}({:.2f}) vol={} liq={} cooldown={}",
-                    int(timestamp.value // 1_000_000),
-                    rf.profile.value,
-                    rf.confidence,
-                    rf.vol_state.value,
-                    rf.liquidity.value,
-                    cooldown,
-                )
+                st = getattr(self._regime_detector, "_STATE", None)
+                cooldown_left = getattr(st, "cooldown_left", None)
+                cooldown_total = getattr(st, "cooldown_total", None) or 0
+                try:
+                    logger.debug(
+                        "[REGIME] ts={} prim={}({:.2f}) vol={} liq={} cooldown={}/{}",
+                        int(timestamp.value // 1_000_000),
+                        rf.profile.value,
+                        rf.confidence,
+                        rf.vol_state.value,
+                        rf.liquidity.value,
+                        cooldown_left,
+                        cooldown_total,
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logger.exception("Regime compute error: {}", e)
+
+        # --- Sprint 41 Whale Features (computed once per bar per symbol) ---
+        try:
+            whale_cfg = ((self._settings or {}).get('features', {}) or {}).get('whales', {})
+            if whale_cfg.get('enabled', False):
+                now_ms = int(timestamp.value // 1_000_000)
+                w_state = self._whale_state  # global state keyed by groups
+                # compute uses global state; symbol filter inside compute
+                wf_raw = compute_whale_features(symbol, now_ms, w_state, whale_cfg)
+                if wf_raw:
+                    feature_dict['whales'] = WhaleFeatures(**wf_raw)
+        except Exception as e:
+            logger.exception('Whale features error: {}', e)
+
+        # --- Sprint 42 Macro Fusion (single invocation per primary symbol/timeframe) ---
+        try:
+            ca_cfg = ((self._settings or {}).get('cross_asset', {}) or {})
+            if ca_cfg.get('enabled', False) and MacroEngine is not None:
+                # Only compute for primary symbol (first in primary_symbols list)
+                prim_syms = ca_cfg.get('primary_symbols') or []
+                if prim_syms and symbol == prim_syms[0]:
+                    self._macro_engine = getattr(self, '_macro_engine', None) or MacroEngine(self._settings)
+                    # Placeholder: external frames should be provided by upstream scheduler; use empty for scaffold
+                    externals = getattr(self, '_macro_external_frames', {})  # can be injected externally
+                    btc_df = ohlcv
+                    eth_df = None
+                    if 'ETHUSDT' in prim_syms and symbol != 'ETHUSDT':
+                        eth_df = self.get_ohlcv('ETHUSDT', timeframe)
+                    macro_feats = self._macro_engine.compute_features(int(timestamp.value // 1_000_000), btc_df, eth_df, externals)
+                    if macro_feats:
+                        feature_dict['macro'] = macro_feats
+                        # Optional persistence if diagnostics enabled
+                        diag = ca_cfg.get('diagnostics') or {}
+                        if diag.get('emit'):
+                            try:
+                                row = macro_feats.model_dump() if hasattr(macro_feats, 'model_dump') else dict(macro_feats)
+                                row['symbol'] = symbol; row['ts'] = int(timestamp.value // 1_000_000)
+                                fmt = (diag.get('format') or 'csv').lower()
+                                # If async, buffer; else immediate flush via temporary DataFrame
+                                if diag.get('async', True):
+                                    self._buffer_macro_row(row)
+                                else:
+                                    import pandas as _pd, os as _os
+                                    path = diag.get('export_path') or ('macro_features.parquet' if fmt=='parquet' else 'macro_features.csv')
+                                    if fmt == 'parquet':
+                                        if _os.path.isdir(path):
+                                            fname = time.strftime('macro_features_%Y%m%d.parquet')
+                                            full = _os.path.join(path, fname)
+                                        else:
+                                            full = path
+                                        if _os.path.isfile(full):
+                                            try:
+                                                old = _pd.read_parquet(full)
+                                                df = _pd.concat([old, _pd.DataFrame([row])], ignore_index=True)
+                                            except Exception:
+                                                df = _pd.DataFrame([row])
+                                        else:
+                                            df = _pd.DataFrame([row])
+                                        df.to_parquet(full, index=False)
+                                    else:
+                                        exists = _os.path.isfile(path)
+                                        _pd.DataFrame([row]).to_csv(path, mode='a' if exists else 'w', header=not exists, index=False)
+                            except Exception:
+                                pass
+        except Exception as e:  # pragma: no cover
+            logger.debug('Macro features error (non-fatal): {}', e)
+
+        # --- Sprint 44 Pattern Engine integration (attach / refresh latest pattern snapshots) ---
+        try:
+            pat_cfg = ((self._settings or {}).get('patterns', {}) or {})
+            if pat_cfg.get('enabled', True):
+                if self._pattern_engine is None:
+                    self._pattern_engine = PatternEngine.with_default_detectors(pat_cfg)
+                pats: list[PatternInstance] = self._pattern_engine.on_bar(symbol, timeframe, ohlcv)
+                if pats:
+                    feature_dict['patterns'] = pats
+        except Exception:
+            pass
 
     # ------------------- Latest market snapshots -------------------
 
@@ -527,6 +688,38 @@ class FeatureStore:
 
     def get_ohlcv(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
         return self._ohlcv_data.get(symbol, {}).get(timeframe)
+
+    # --- Added for Stop Optimizer deep integration (Sprint 37 optional enhancement) ---
+    def get_ohlcv_slice(self, symbol: str, timeframe: str, ts_start: int, ts_end: int) -> Optional[pd.DataFrame]:
+        """Return inclusive OHLCV slice between two epoch seconds (or ms) bounds.
+
+        Args:
+            symbol: trading symbol key
+            timeframe: timeframe key used when ingesting
+            ts_start: epoch seconds (or ms) lower bound
+            ts_end: epoch seconds (or ms) upper bound
+        """
+        df = self.get_ohlcv(symbol, timeframe)
+        if df is None or df.empty:
+            return None
+        # Accept seconds or ms; detect length of integer
+        def _coerce(v: int):
+            try:
+                digits = len(str(int(v)))
+                if digits <= 10:
+                    return pd.to_datetime(int(v), unit='s')
+                elif digits <= 13:
+                    return pd.to_datetime(int(v), unit='ms')
+                else:
+                    return pd.to_datetime(int(v), unit='ns')
+            except Exception:
+                return pd.to_datetime(v, unit='s', errors='coerce')
+        start_dt = _coerce(ts_start)
+        end_dt = _coerce(ts_end)
+        try:
+            return df[(df.index >= start_dt) & (df.index <= end_dt)]
+        except Exception:
+            return None
 
     def get_spread(self, symbol: str) -> Optional[Tuple[float, float, float]]:
         if ticker := self._latest_book_ticker.get(symbol):
@@ -647,6 +840,78 @@ class FeatureStore:
             "A": float(getattr(t, "best_ask_qty", 0.0)),
         }
 
+    # ---------------- Macro async export helpers -----------------
+    def _start_macro_export_thread(self):
+        if self._macro_export_thread and self._macro_export_thread.is_alive():
+            return
+        def _loop():
+            while not self._macro_export_stop.is_set():
+                try:
+                    self._maybe_flush_macro(force=False)
+                except Exception:
+                    pass
+                time.sleep(1.0)
+            # final flush
+            try:
+                self._maybe_flush_macro(force=True)
+            except Exception:
+                pass
+        t = threading.Thread(target=_loop, name="MacroExportFlusher", daemon=True)
+        t.start()
+        self._macro_export_thread = t
+
+    def shutdown(self):  # call from app on exit
+        try:
+            self._macro_export_stop.set()
+            if self._macro_export_thread and self._macro_export_thread.is_alive():
+                self._macro_export_thread.join(timeout=2)
+        except Exception:
+            pass
+
+    def _buffer_macro_row(self, row: Dict[str, Any]):
+        with self._macro_export_lock:
+            self._macro_export_buffer.append(row)
+
+    def _maybe_flush_macro(self, force: bool):
+        ca_cfg = ((self._settings or {}).get('cross_asset', {}) or {})
+        diag = ca_cfg.get('diagnostics') or {}
+        if not (ca_cfg.get('enabled') and diag.get('emit')):
+            return
+        batch_size = int(diag.get('batch_size', 250) or 250)
+        flush_interval = int(diag.get('flush_interval_sec', 60) or 60)
+        fmt = (diag.get('format') or 'csv').lower()
+        now = time.time()
+        with self._macro_export_lock:
+            do_flush = force or len(self._macro_export_buffer) >= batch_size or (now - self._macro_export_last_flush) >= flush_interval
+            if not do_flush or not self._macro_export_buffer:
+                return
+            rows = self._macro_export_buffer
+            self._macro_export_buffer = []
+            self._macro_export_last_flush = now
+        try:
+            df = pd.DataFrame(rows)
+            path = diag.get('export_path') or ('macro_features.parquet' if fmt=='parquet' else 'macro_features.csv')
+            if fmt == 'parquet':
+                # if path is directory, create daily file
+                if os.path.isdir(path):
+                    fname = time.strftime('macro_features_%Y%m%d.parquet')
+                    full = os.path.join(path, fname)
+                else:
+                    full = path
+                # append via concat if file exists (simple approach)
+                if os.path.isfile(full):
+                    try:
+                        old = pd.read_parquet(full)
+                        df = pd.concat([old, df], ignore_index=True)
+                    except Exception:
+                        pass
+                df.to_parquet(full, index=False)
+            else:  # csv
+                exists = os.path.isfile(path)
+                df.to_csv(path, mode='a' if exists else 'w', header=not exists, index=False)
+        except Exception:
+            pass
+
     # --- Spread in basis points (bps) convenience
     def get_spread_bps(self, symbol: str) -> Optional[float]:
         sp = self.get_spread(symbol)
@@ -753,6 +1018,87 @@ class FeatureStore:
         if feats and "regime" in feats:
             return feats["regime"]
         return None
+
+    # Sprint 10 helper: structured regime query (at or before timestamp)
+    def get_regime(self, symbol: str, timeframe: str, ts_like: Any = None):  # type: ignore[override]
+        if ts_like is None:
+            feats = self.get_latest_features(symbol, timeframe)
+        else:
+            feats = self.get_features(symbol, timeframe, self._to_timestamp(ts_like), nearest=True)
+        if feats:
+            return feats.get("regime")
+        return None
+
+    # =======================  SPRINT 41 WHALE HELPERS  =======================
+    def whale_add_exchange_flow(self, symbol: str, direction: str, usd: float, ts_ms: Optional[int] = None) -> None:
+        """Record a tagged exchange flow (deposit/withdrawal) in USD notional.
+
+        direction: 'DEPOSIT' | 'WITHDRAWAL'
+        """
+        try:
+            if direction not in ("DEPOSIT", "WITHDRAWAL"):
+                return
+            g = self._whale_state.setdefault('exchange_flows', {})
+            recs = g.setdefault('records', [])
+            recs.append({
+                'ts': ts_ms or int(pd.Timestamp.utcnow().value // 1_000_000),
+                'symbol': symbol,
+                'direction': direction,
+                'usd': float(usd or 0.0),
+            })
+            # Trim
+            if len(recs) > 20_000:
+                del recs[:10_000]
+        except Exception:
+            pass
+
+    def whale_add_block_trade(self, symbol: str, side: str, notional: float, trade_type: str = 'BLOCK', ts_ms: Optional[int] = None) -> None:
+        try:
+            if side not in ("BUY", "SELL"):
+                return
+            g = self._whale_state.setdefault('blocks', {})
+            recs = g.setdefault('records', [])
+            recs.append({
+                'ts': ts_ms or int(pd.Timestamp.utcnow().value // 1_000_000),
+                'symbol': symbol,
+                'side': side,
+                'notional': float(notional or 0.0),
+                'type': trade_type.upper(),  # BLOCK | SWEEP | ICEBERG
+            })
+            if len(recs) > 10_000:
+                del recs[:5_000]
+        except Exception:
+            pass
+
+    def whale_update_options_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        try:
+            self._whale_state.setdefault('options', {})['snapshot'] = dict(snapshot or {})
+        except Exception:
+            pass
+
+    def whale_add_smart_money_trade(self, symbol: str, side: str, usd: float, wallet: Optional[str] = None, ts_ms: Optional[int] = None) -> None:
+        try:
+            if side not in ("BUY", "SELL"):
+                return
+            g = self._whale_state.setdefault('smart_money', {})
+            recs = g.setdefault('records', [])
+            recs.append({
+                'ts': ts_ms or int(pd.Timestamp.utcnow().value // 1_000_000),
+                'symbol': symbol,
+                'side': side,
+                'usd': float(usd or 0.0),
+                'wallet': wallet,
+            })
+            if len(recs) > 15_000:
+                del recs[:7_500]
+        except Exception:
+            pass
+
+    def whale_set_smart_money_hit_rate(self, hit_rate_30d: float) -> None:
+        try:
+            self._whale_state.setdefault('smart_money', {})['hit_rate_30d'] = float(hit_rate_30d)
+        except Exception:
+            pass
 
 
 # --- Example Usage ---

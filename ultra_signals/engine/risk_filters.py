@@ -40,6 +40,12 @@ try:
 except Exception:
     NewsFilter = None  # type: ignore
 
+# Sprint 40 sentiment (optional import)
+try:
+    from ultra_signals.sentiment import SentimentEngine  # feature_view(), maybe_veto()
+except Exception:  # pragma: no cover
+    SentimentEngine = None  # type: ignore
+
 
 # ----------------- ORIGINAL DATACLASS (kept) -----------------
 @dataclass
@@ -322,6 +328,31 @@ def apply_filters(signal: Signal, store: FeatureStore, settings: dict) -> Filter
     # If any of the reasons were triggered, veto the trade:
     if reasons:
         return FilterResult(False, reason=";".join(reasons), details=details)
+
+    # ======================= SPRINT 40 SENTIMENT VETO =====================
+    # Evaluate sentiment extreme veto only if earlier filters passed.
+    try:
+        sent_cfg = settings.get("sentiment") if isinstance(settings.get("sentiment"), dict) else None
+        if sent_cfg and sent_cfg.get("enabled", True) and sent_cfg.get("veto_extremes", True) and SentimentEngine is not None:
+            # Lazy singleton: attach to settings dict to avoid repeated init cost.
+            _sent_engine = sent_cfg.get("_engine_instance")
+            if _sent_engine is None:
+                try:
+                    _sent_engine = SentimentEngine(settings)
+                    sent_cfg["_engine_instance"] = _sent_engine  # type: ignore
+                except Exception:
+                    _sent_engine = None
+            if _sent_engine is not None:
+                # Non-blocking step: attempt to refresh in a lightweight way.
+                try:
+                    _sent_engine.step()
+                except Exception:
+                    pass
+                veto_reason = _sent_engine.maybe_veto(signal.symbol)
+                if veto_reason:
+                    return FilterResult(False, reason=veto_reason, details=details)
+    except Exception:
+        pass  # sentiment failures must not break core filter path
 
     # ----------------- 7. PASSED -----------------
     return FilterResult(True)

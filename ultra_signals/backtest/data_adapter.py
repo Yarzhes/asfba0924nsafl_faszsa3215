@@ -1,12 +1,67 @@
 import pandas as pd
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 from loguru import logger
+import hashlib
+import json
+
+
+def _tf_to_ms(tf: str) -> int:
+    """Convert timeframe like '1m','5m','1h' to milliseconds (coarse)."""
+    try:
+        if tf.endswith('ms'):
+            return int(tf[:-2])
+        if tf.endswith('s'):
+            return int(tf[:-1]) * 1000
+        if tf.endswith('m'):
+            return int(tf[:-1]) * 60_000
+        if tf.endswith('h'):
+            return int(tf[:-1]) * 3_600_000
+        if tf.endswith('d'):
+            return int(tf[:-1]) * 86_400_000
+    except Exception:  # pragma: no cover
+        return 0
+    return 0
 
 # ultra_signals/backtest/data_adapter.py
 
 class DataAdapter:
-    def __init__(self, config):
+    # Default routing map (can be extended). Maps canonical symbol -> venue specific.
+    DEFAULT_SYMBOL_ROUTING: Dict[str, str] = {
+        # Perpetual futures (example mappings; adjust for real venue naming conventions)
+        "BTCUSDT": "BTCUSDT",
+        "ETHUSDT": "ETHUSDT",
+        "SOLUSDT": "SOLUSDT",
+        "BNBUSDT": "BNBUSDT",
+        "XRPUSDT": "XRPUSDT",
+        "ADAUSDT": "ADAUSDT",
+        "DOGEUSDT": "DOGEUSDT",
+        "TRXUSDT": "TRXUSDT",
+        "AVAXUSDT": "AVAXUSDT",
+        "LINKUSDT": "LINKUSDT",
+        "DOTUSDT": "DOTUSDT",
+        "MATICUSDT": "MATICUSDT",
+        "LTCUSDT": "LTCUSDT",
+        "BCHUSDT": "BCHUSDT",
+        "SHIBUSDT": "SHIBUSDT",
+        "NEARUSDT": "NEARUSDT",
+        "ATOMUSDT": "ATOMUSDT",
+        "XLMUSDT": "XLMUSDT",
+        "APTUSDT": "APTUSDT",
+        "ARBUSDT": "ARBUSDT",
+        "OPUSDT": "OPUSDT",
+        "FILUSDT": "FILUSDT",
+        "SUIUSDT": "SUIUSDT",
+        "INJUSDT": "INJUSDT",
+        "AAVEUSDT": "AAVEUSDT",
+        "UNIUSDT": "UNIUSDT",
+        "RUNEUSDT": "RUNEUSDT",
+        "ETCUSDT": "ETCUSDT",
+        "TIAUSDT": "TIAUSDT",
+        "TONUSDT": "TONUSDT",
+    }
+
+    def __init__(self, config: Any):
         """
         Accepts either a plain dict or a Pydantic BaseModel (v1 or v2).
         Normalizes to a dict so downstream code can use .get(...)
@@ -31,6 +86,74 @@ class DataAdapter:
         # (optional) keep a reference to other top-level sections if you use them
         self.features_cfg = cfg.get("features", {}) or {}
         self.runtime_cfg = cfg.get("runtime", {}) or {}
+        self.backtest_cfg = cfg.get("backtest", {}) or {}
+        self.batch_cfg = cfg.get("batch_run", {}) or {}
+
+        # Cache root (backtest.data.cache_path preferred)
+        try:
+            self.cache_root = Path(((self.backtest_cfg.get("data") or {}).get("cache_path")) or ".cache/data")
+        except Exception:
+            self.cache_root = Path(".cache/data")
+        self.cache_root.mkdir(parents=True, exist_ok=True)
+        self.reuse_cache = bool(self.batch_cfg.get("reuse_cache", False))
+        # Allow user override of routing map via config: runtime.symbol_routing or data.symbol_routing
+        self.symbol_routing: Dict[str, str] = {
+            **self.DEFAULT_SYMBOL_ROUTING,
+            **(self.runtime_cfg.get("symbol_routing", {}) or {}),
+            **(self.config.get("symbol_routing", {}) or {}),
+        }
+
+    # ---------------- Symbol Routing -----------------
+    def route_symbol(self, symbol: str) -> str:
+        """Return venue-specific routed symbol (falls back to original)."""
+        if not symbol:
+            return symbol
+        routed = self.symbol_routing.get(symbol.upper())
+        if routed:
+            return routed
+        # Heuristic: convert BTCUSDT -> BTC/USDT if mapping missing and slash variant exists in directory
+        if symbol.endswith("USDT"):
+            slash_form = symbol[:-4] + "/USDT"
+            if slash_form in self.symbol_routing.values():
+                return slash_form
+        return symbol
+
+    # ---------------- Cache Helpers ------------------
+    def _cache_file(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> Path:
+        """Return deterministic cache file path for symbol/timeframe/date-range."""
+        key = f"{symbol}|{timeframe}|{start_date}|{end_date}".encode()
+        h = hashlib.md5(key).hexdigest()[:16]
+        subdir = self.cache_root / symbol / timeframe
+        subdir.mkdir(parents=True, exist_ok=True)
+        return subdir / f"{h}.parquet"
+
+    def _load_from_local_cache(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+        path = self._cache_file(symbol, timeframe, start_date, end_date)
+        if not path.exists():
+            return None
+        try:
+            df = pd.read_parquet(path)
+            # Basic schema sanity
+            if df.empty or not {"open","high","low","close"}.issubset(df.columns):
+                return None
+            logger.info(f"[cache] hit {path}")
+            df.index = pd.to_datetime(df.index)
+            return df
+        except Exception:
+            return None
+
+    def _store_to_local_cache(self, symbol: str, timeframe: str, start_date: str, end_date: str, df: pd.DataFrame):
+        if df is None or df.empty:
+            return
+        try:
+            path = self._cache_file(symbol, timeframe, start_date, end_date)
+            # Store with index (timestamp) retained
+            df.to_parquet(path)
+            meta = {"rows": int(len(df)), "start": str(df.index.min()), "end": str(df.index.max())}
+            path.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            logger.info(f"[cache] stored {path} rows={len(df)}")
+        except Exception as e:
+            logger.warning(f"[cache] store failed: {e}")
 
 
     def load_ohlcv(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
@@ -39,12 +162,50 @@ class DataAdapter:
         Supports loading from CSV, Parquet, or exchange (via cache).
         """
         provider = self.config.get("provider", "csv")
-        logger.info(f"Loading OHLCV for {symbol} ({timeframe}) from {provider} between {start_date} and {end_date}")
+        routed_symbol = self.route_symbol(symbol)
+        logger.info(f"Loading OHLCV for {symbol} -> {routed_symbol} ({timeframe}) from {provider} between {start_date} and {end_date}")
+
+        # Local cache layer (independent of provider); only if reuse_cache flag set
+        if self.reuse_cache:
+            cached = self._load_from_local_cache(symbol, timeframe, start_date, end_date)
+            if cached is not None:
+                return cached
 
         if provider in ["csv", "parquet"]:
-            return self._load_from_file(symbol, timeframe, start_date, end_date, provider)
+            df = self._load_from_file(routed_symbol, timeframe, start_date, end_date, provider)
+            if df is not None and not df.empty:
+                # --- DQ Pipeline (non-intrusive) ---
+                try:
+                    from ultra_signals.dq import normalizer as _dq_norm, validators as _dq_val, gap_filler as _dq_gap
+                    settings_like = {"data_quality": self.config.get("data_quality", {})}
+                    # convert to canonical schema with ts column (ms)
+                    work = df.reset_index().rename(columns={df.index.name or 'timestamp': 'timestamp'})
+                    work['ts'] = pd.to_datetime(work['timestamp']).astype('int64') // 1_000_000
+                    work = work[['ts','open','high','low','close','volume']]
+                    tf_ms = _tf_to_ms(timeframe)
+                    # validate
+                    rep = _dq_val.validate_ohlcv_df(work, tf_ms, settings_like, symbol, 'BACKTEST')
+                    if not rep.ok:
+                        logger.warning(f"dq.validation_failed symbol={symbol} errors={rep.errors}")
+                    # gap heal if needed
+                    if rep.warnings and any('low_coverage' in w for w in rep.warnings):
+                        def _fetcher(symbol: str, ts: int):
+                            return None  # placeholder offline backfill disabled
+                        healed, greport = _dq_gap.heal_gaps_ohlcv(work, symbol, tf_ms, _fetcher, settings_like)
+                        work = healed
+                    # restore index
+                    work['timestamp'] = pd.to_datetime(work['ts'], unit='ms')
+                    df = work.set_index('timestamp')[['open','high','low','close','volume']]
+                except Exception as e:  # pragma: no cover
+                    logger.debug(f"dq.pipeline_skip reason={e}")
+            if self.reuse_cache and df is not None and not df.empty:
+                self._store_to_local_cache(symbol, timeframe, start_date, end_date, df)
+            return df
         elif provider == "exchange":
-            return self._load_from_cache(symbol, timeframe, start_date, end_date)
+            df = self._load_from_cache(routed_symbol, timeframe, start_date, end_date)
+            if self.reuse_cache and df is not None and not df.empty:
+                self._store_to_local_cache(symbol, timeframe, start_date, end_date, df)
+            return df
         else:
             logger.error(f"Unsupported data provider: {provider}")
             return None

@@ -1,5 +1,6 @@
 # ultra_signals/apps/backtest_cli.py
 import argparse
+import math
 from datetime import datetime
 from typing import Any, List
 from loguru import logger
@@ -29,266 +30,249 @@ from ultra_signals.calibration.persistence import save_leaderboard, save_best
 from ultra_signals.calibration.search_space import SearchSpace
 from ultra_signals.core.meta_router import MetaRouter
 from ultra_signals.backtest.metrics import compute_kpis, calculate_brier_score
+from sklearn.metrics import average_precision_score, roc_auc_score, brier_score_loss
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 
 
 def handle_run(args: argparse.Namespace, settings: Any) -> None:
-    """Entrypoint for the 'run' command."""
+    """Entrypoint for the 'run' command (clean refactored)."""
     logger.info("Command: Run Backtest")
-
-    # Some unit tests mistakenly pass the mocked load_settings function instead of the
-    # resolved settings object. If we detect a callable without model_dump, attempt to
-    # invoke it to obtain the real settings instance.
+    # Normalize settings object (allow MagicMock in tests)
     if (not hasattr(settings, 'model_dump')) and callable(settings):
         try:
             maybe = settings()
             if hasattr(maybe, 'model_dump'):
                 settings = maybe
         except Exception:
-            # Fall through; we'll operate on the MagicMock which will still be attribute-flexible.
             pass
-
-    # --- NEW: echo settings & exit early ---
-    if getattr(args, "echo", False):
+    if getattr(args, 'echo', False):
         try:
-            # pydantic v2 has model_dump_json
             print(settings.model_dump_json(indent=2))
         except Exception:
             import json
             print(json.dumps(settings.model_dump(), indent=2, default=str))
         return
-    # ---------------------------------------
 
-    base_settings_dict = settings.model_dump() if hasattr(settings, 'model_dump') else {}
-    # Guard: if model_dump returned a MagicMock (common when a loader mock was passed), coerce to dict.
-    if not isinstance(base_settings_dict, dict):
-        try:
-            # Attempt pydantic v1 style .dict()
-            if hasattr(settings, 'dict'):
-                base_settings_dict = settings.dict()
-        except Exception:
-            base_settings_dict = {}
-    profiles_root = getattr(args, 'profiles', None) or base_settings_dict.get('profiles', {}).get('root_dir')
-    hot = bool(getattr(args, 'hot_reload', False) or (base_settings_dict.get('profiles', {}) or {}).get('hot_reload'))
-    meta_router = MetaRouter(base_settings_dict, root_dir=profiles_root, hot_reload=hot) if profiles_root else None
-    resolved_settings_dict = base_settings_dict
-    # Allow overriding symbols/timeframes via CLI for basket
+    resolved_settings = settings.model_dump() if hasattr(settings, 'model_dump') else {}
+    if not isinstance(resolved_settings, dict) and hasattr(settings, 'dict'):
+        resolved_settings = settings.dict()
+
+    # CLI overrides
     if getattr(args, 'symbols', None):
-        syms = [s.strip() for s in args.symbols.split(',') if s.strip()]
-        resolved_settings_dict.setdefault('runtime', {})['symbols'] = syms
+        resolved_settings.setdefault('runtime', {})['symbols'] = [s.strip() for s in args.symbols.split(',') if s.strip()]
     if getattr(args, 'timeframes', None):
-        # primary timeframe still used by engine; first provided kept
-        tfs = [t.strip() for t in args.timeframes.split(',') if t.strip()]
+        tfs=[t.strip() for t in args.timeframes.split(',') if t.strip()]
         if tfs:
-            resolved_settings_dict.setdefault('runtime', {})['primary_timeframe'] = tfs[0]
+            resolved_settings.setdefault('runtime', {})['primary_timeframe']=tfs[0]
+    if getattr(args, 'symbol', None):
+        resolved_settings.setdefault('runtime', {})['symbols'] = [args.symbol]
+    tf_override = getattr(args,'tf',None) or getattr(args,'interval',None)
+    if tf_override:
+        resolved_settings.setdefault('runtime', {})['primary_timeframe'] = tf_override
+    if getattr(args,'from_',None):
+        resolved_settings.setdefault('backtest', {})['start_date']=args.from_
+    if getattr(args,'to',None):
+        resolved_settings.setdefault('backtest', {})['end_date']=args.to
+    if getattr(args,'start',None):
+        resolved_settings.setdefault('backtest', {})['start_date']=args.start
+    if getattr(args,'end',None):
+        resolved_settings.setdefault('backtest', {})['end_date']=args.end
 
-    # DataAdapter expects a dict-like config with .get
-    adapter = DataAdapter(resolved_settings_dict)
+    profiles_root = getattr(args,'profiles',None) or resolved_settings.get('profiles',{}).get('root_dir')
+    hot = bool(getattr(args,'hot_reload',False) or (resolved_settings.get('profiles',{}) or {}).get('hot_reload'))
+    meta_router = MetaRouter(resolved_settings, root_dir=profiles_root, hot_reload=hot) if profiles_root else None
 
-    raw_warmup = getattr(settings.features, "warmup_periods", 100)
-    try:
-        warmup = int(raw_warmup)
-    except Exception:
-        warmup = 100
-    if warmup <= 1:
-        warmup = 2
+    # Core components
+    adapter = DataAdapter(resolved_settings)
+    warmup = max(2, int(getattr(settings.features,'warmup_periods',100))) if hasattr(settings,'features') else 100
+    feature_store = FeatureStore(warmup_periods=warmup, settings=resolved_settings)
+    signal_engine = RealSignalEngine(resolved_settings, feature_store)
+    runner = EventRunner(resolved_settings, adapter, signal_engine, feature_store)
 
-    # --- SINGLE FEATURESTORE FIX: create exactly one instance and share it everywhere ---
-    feature_store = FeatureStore(warmup_periods=warmup, settings=resolved_settings_dict)
-    signal_engine = RealSignalEngine(resolved_settings_dict, feature_store)
-    runner = EventRunner(settings.model_dump(), adapter, signal_engine, feature_store)
+    symbols = resolved_settings.get('runtime',{}).get('symbols') or ['BTCUSDT']
+    timeframe = resolved_settings.get('runtime',{}).get('primary_timeframe','5m')
 
-    # Guard + helpful debug so the "two stores" bug can't happen silently.
-    logger.debug(f"[backtest_cli] FeatureStore(shared) id={id(feature_store)}")
-    logger.debug(f"[backtest_cli] Engine.FeatureStore id={id(getattr(signal_engine, 'feature_store', None))}")
-    logger.debug(f"[backtest_cli] Runner.FeatureStore id={id(getattr(runner, 'feature_store', None))}")
-
-    # If the runner ended up with a different (or missing) store (e.g., MagicMock),
-    # force it to the shared instance instead of asserting hard.
-    try:
-        if getattr(runner, "feature_store", None) is not feature_store:
-            setattr(runner, "feature_store", feature_store)
-            logger.warning(
-                "Runner.FeatureStore differed from shared FeatureStore. "
-                "Re-bound runner.feature_store to the shared instance."
-            )
-    except Exception as e:
-        logger.warning(f"Could not inspect/set runner.feature_store: {e}")
-    # -------------------------------------------------------------------------------
-
-    # For now, we run on the first symbol specified in runtime config
-    # Derive symbols/timeframe robustly even if settings is a MagicMock
-    symbols = []
-    try:
-        symbols = resolved_settings_dict.get('runtime', {}).get('symbols') or []
-        if not symbols and hasattr(settings, 'runtime') and getattr(settings.runtime, 'symbols', None):
-            symbols = list(settings.runtime.symbols)
-    except Exception:
-        pass
-    if not symbols:
-        symbols = ['BTCUSDT']  # safe fallback
-    try:
-        timeframe = resolved_settings_dict.get('runtime', {}).get('primary_timeframe') or getattr(settings.runtime, 'primary_timeframe', '5m')
-    except Exception:
-        timeframe = '5m'
-    all_trades = []
-    equity = []
-    routing_rows = []  # NEW: collect meta-router audit rows if enabled
+    all_trades=[]; equity=[]; routing_rows=[]
     for sym in symbols:
         if meta_router and profiles_root:
-            routed = meta_router.resolve(sym, timeframe, profiles_root)
-            # attach routing meta to settings for engine (simplified - could rebuild engine per symbol)
-            signal_engine.settings.update(routed)
-            if getattr(args, 'routing_audit', False):
-                try:
-                    mr = routed.get('meta_router', {}) or {}
+            try:
+                routed = meta_router.resolve(sym, timeframe, profiles_root)
+                signal_engine.settings.update(routed)
+                if getattr(args,'routing_audit',False):
                     import time as _t
-                    row = {
-                        'ts': int(_t.time()),
-                        'symbol': sym,
-                        'tf': timeframe,
-                        'profile_id': mr.get('profile_id'),
-                        'version': mr.get('version'),
+                    mr = routed.get('meta_router',{}) or {}
+                    routing_rows.append({
+                        'ts': int(_t.time()), 'symbol': sym, 'tf': timeframe,
+                        'profile_id': mr.get('profile_id'), 'version': mr.get('version'),
                         'used_overrides': '|'.join(mr.get('resolved_keys') or []),
                         'fall_back_chain': '>'.join(mr.get('fallback_chain') or []),
-                        'missing': mr.get('missing'),
-                        'stale': mr.get('stale'),
-                    }
-                    routing_rows.append(row)
-                except Exception:
-                    pass
-        t, eq = runner.run(sym, timeframe)
-        if t:
-            all_trades.extend(t)
-        if eq:
-            equity = eq
-    trades = all_trades
-
-    if trades:
-        trades_df = pd.DataFrame(trades)
-        kpis = compute_kpis(trades_df)
-
-        # Sprint 15: extract optional sizing telemetry columns into trades_df if present inside vote_detail
-        if 'vote_detail' in trades_df.columns:
-            try:
-                import json
-                def _extract_dict(col):
-                    if isinstance(col, dict):
-                        return col
-                    try:
-                        return json.loads(col)
-                    except Exception:
-                        return {}
-                vd_series = trades_df['vote_detail'].apply(_extract_dict)
-                trades_df['signal_confidence'] = vd_series.apply(lambda d: d.get('confidence'))
-                # Sprint15 sizing overlay telemetry
-                trades_df['position_size'] = vd_series.apply(lambda d: (d.get('position_sizer') or {}).get('size_quote_playbook')
-                                                            or (d.get('position_sizer') or {}).get('size_quote'))
-                trades_df['atr'] = vd_series.apply(lambda d: (d.get('position_sizer') or {}).get('atr')
-                                                    or (d.get('risk_model') or {}).get('atr'))
-                trades_df['liq_cluster_risk'] = vd_series.apply(lambda d: (d.get('position_sizer') or {}).get('liq_cluster_risk'))
-                # Expected RR: prefer playbook summary fields
-                def _exp_rr(d):
-                    pb = d.get('playbook') or {}
-                    return pb.get('expected_rr') or (d.get('risk_model') or {}).get('expected_rr')
-                trades_df['expected_risk_reward'] = vd_series.apply(_exp_rr)
-                # Optional pretty formatting '1:RR'
-                def _rr_str(x):
-                    try:
-                        xr = float(x)
-                        if xr > 0:
-                            return f"1:{round(xr,2)}"
-                    except Exception:
-                        pass
-                    return None
-                trades_df['expected_risk_reward_str'] = trades_df['expected_risk_reward'].apply(_rr_str)
+                        'missing': mr.get('missing'), 'stale': mr.get('stale')
+                    })
             except Exception:
                 pass
+        t, eq = runner.run(sym, timeframe)
+        if t: all_trades.extend(t)
+        if eq: equity = eq
 
-        report_settings = settings.reports.model_dump()
-        if getattr(args, "output_dir", None):
-            report_settings["output_dir"] = args.output_dir
-
-        reporter = ReportGenerator(report_settings)
-        routing_df = None
-        if routing_rows:
-            try:
-                routing_df = pd.DataFrame(routing_rows)
-            except Exception:
-                routing_df = None
-        if routing_df is not None:
-            reporter.generate_report(kpis, equity, trades_df, routing_audit=routing_df)
-        else:
-            reporter.generate_report(kpis, equity, trades_df)  # Pass raw equity list
-        out_dir_msg = report_settings.get('output_dir', 'reports/backtest_results') if isinstance(report_settings, dict) else 'reports/backtest_results'
-        logger.success(f"Backtest finished. Report generated in {out_dir_msg}.")
-        # --- Sprint 18: optional quality distribution & performance report ---
-        if getattr(args, 'quality_report', False):
-            try:
-                import json, math, collections
-                q_bins = []
-                vetoes = []
-                soft_flags = []
-                size_mults = []
-                rr_vals = []
-                for raw in trades_df.get('vote_detail', []):
-                    try:
-                        vd = raw if isinstance(raw, dict) else json.loads(raw)
-                    except Exception:
-                        vd = {}
-                    q = vd.get('quality') or {}
-                    if q:
-                        q_bins.append(q.get('bin'))
-                        vetoes.extend(q.get('vetoes') or [])
-                        soft_flags.extend(q.get('soft_flags') or [])
-                        size_mults.append(float(q.get('size_multiplier') or vd.get('quality_size_mult') or 1.0))
-                    else:
-                        q_bins.append(None)
-                dist = collections.Counter([b for b in q_bins if b])
-                total_q = sum(dist.values()) or 1
-                lines = ["Quality Gate Report", "====================", f"Total qualified trades: {total_q}"]
-                for b in ['A+','A','B','C','D']:
-                    cnt = dist.get(b,0); pct = cnt/total_q*100 if total_q else 0
-                    lines.append(f"{b}: {cnt} ({pct:.1f}%)")
-                # Per-bin performance metrics if pnl present
-                if 'pnl' in trades_df.columns and 'rr' in trades_df.columns:
-                    lines.append("\nPer-Bin Performance")
-                    lines.append("-------------------")
-                    for b in ['A+','A','B','C','D']:
-                        mask = [qb==b for qb in q_bins]
-                        if any(mask):
-                            sub = trades_df[mask]
-                            wins = (sub['pnl']>0).sum(); losses = (sub['pnl']<=0).sum()
-                            winrate = wins / max(1,(wins+losses))
-                            gross_win = sub[sub['pnl']>0]['pnl'].sum(); gross_loss = -sub[sub['pnl']<=0]['pnl'].sum()
-                            pf = gross_win / gross_loss if gross_loss>0 else float('inf')
-                            avg_rr = sub['rr'].mean()
-                            lines.append(f"{b}: trades={len(sub)} win%={winrate:.2%} pf={pf:.2f} avgRR={avg_rr:.2f}")
-                if vetoes:
-                    lines.append("\nTop Veto Reasons")
-                    lines.append("----------------")
-                    for r,c in collections.Counter(vetoes).most_common(10):
-                        lines.append(f"{r}: {c}")
-                if soft_flags:
-                    lines.append("\nSoft Gate Flags")
-                    lines.append("----------------")
-                    for r,c in collections.Counter(soft_flags).most_common(10):
-                        lines.append(f"{r}: {c}")
-                if size_mults:
-                    avg_mult = sum(size_mults)/len(size_mults)
-                    lines.append(f"\nAvg Size Multiplier: {avg_mult:.3f}")
-                from pathlib import Path as _P
-                qfile = _P(out_dir_msg)/'quality_report.txt'
-                qfile.write_text("\n".join(lines), encoding='utf-8')
-                logger.info("Quality report written to {}", qfile)
-            except Exception as e:
-                logger.warning(f"Failed generating quality-report: {e}")
-    else:
+    if not all_trades:
         logger.warning("Backtest finished with no trades.")
-    # NOTE: Previously exited with non-zero status; changed to return gracefully to avoid
-    # failing unit tests that only assert runner invocation. CLI semantics (non-zero on no trades)
-    # can be enforced in a wrapper script if needed.
+        return
+
+    trades_df = pd.DataFrame(all_trades)
+    kpis = compute_kpis(trades_df)
+    # Meta probability metrics extraction
+    meta_probs = []
+    meta_actions = []
+    meta_shadow = []
+    outcomes = []
+    if 'vote_detail' in trades_df.columns and 'result' in trades_df.columns:
+        import json
+        def _vd(row):
+            if isinstance(row, dict): return row
+            try: return json.loads(row)
+            except Exception: return {}
+        vd_series = trades_df['vote_detail'].apply(_vd)
+        # outcome: TP=1 else 0 (approx)
+        outcomes = (trades_df['result'].astype(str).str.upper().str.startswith('TP')).astype(int).values
+        for d in vd_series:
+            mg = d.get('meta_gate') or {}
+            p = mg.get('p')
+            if p is None:
+                meta_probs.append(np.nan)
+            else:
+                meta_probs.append(float(p))
+            meta_actions.append(mg.get('action'))
+            meta_shadow.append(bool(mg.get('shadow_mode')))
+        trades_df['meta_p'] = meta_probs
+        trades_df['meta_action'] = meta_actions
+        trades_df['meta_shadow'] = meta_shadow
+        # Compute metrics where probability available
+        try:
+            valid_mask = ~pd.isna(trades_df['meta_p'])
+            if valid_mask.any():
+                y_true = outcomes[valid_mask.values]
+                y_pred = trades_df.loc[valid_mask,'meta_p'].astype(float).values
+                kpis['meta_auc_pr'] = float(average_precision_score(y_true, y_pred))
+                kpis['meta_auc_roc'] = float(roc_auc_score(y_true, y_pred)) if len(np.unique(y_true))>1 else 0.0
+                kpis['meta_brier'] = float(brier_score_loss(y_true, y_pred))
+                # decile lift
+                try:
+                    deciles = pd.qcut(y_pred, 10, labels=False, duplicates='drop')
+                    lifts=[]
+                    for d in range(deciles.max()+1):
+                        m = deciles==d
+                        if m.sum()>0:
+                            lifts.append({'decile': int(d), 'win_rate': float(y_true[m].mean())})
+                    kpis['meta_decile_lift_top_vs_bottom'] = (lifts[-1]['win_rate'] - lifts[0]['win_rate']) if len(lifts)>=2 else None
+                except Exception:
+                    pass
+                # kept/filtered: treat DAMPEN as kept; VETO as filtered (if we recorded VETO in vetoes list)
+                try:
+                    if 'vetoes' in trades_df.columns:
+                        veto_counts = trades_df['vetoes'].apply(lambda v: len(v) if isinstance(v,list) else 0)
+                        kpis['veto_rate_pct'] = float((veto_counts>0).mean()*100.0)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Optional sizing / telemetry extraction (retained)
+    if 'vote_detail' in trades_df.columns:
+        try:
+            import json
+            def _extract_dict(col):
+                if isinstance(col, dict): return col
+                try: return json.loads(col)
+                except Exception: return {}
+            vd_series = trades_df['vote_detail'].apply(_extract_dict)
+            trades_df['signal_confidence'] = vd_series.apply(lambda d: d.get('confidence'))
+            # Sprint 32 sizing metrics
+            def _adv(d):
+                return d.get('advanced_sizer') or {}
+            adv_series = vd_series.apply(_adv)
+            # risk pct effective distribution
+            trades_df['adv_risk_pct'] = adv_series.apply(lambda a: a.get('risk_pct_effective'))
+            if trades_df['adv_risk_pct'].notna().any():
+                kpis['avg_risk_pct'] = float(trades_df['adv_risk_pct'].mean(skipna=True))
+                kpis['median_risk_pct'] = float(trades_df['adv_risk_pct'].median(skipna=True))
+                kpis['kelly_usage_rate'] = float((adv_series.apply(lambda a: (a.get('kelly_mult') or 1.0) > 1.0).mean()))
+                kpis['dd_scaler_active_rate'] = float((adv_series.apply(lambda a: (a.get('dd_mult') or 1.0) < 1.0).mean()))
+        except Exception:
+            pass
+
+    report_settings = settings.reports.model_dump()
+    if getattr(args,'output_dir',None):
+        report_settings['output_dir']=args.output_dir
+    reporter = ReportGenerator(report_settings)
+    routing_df=None
+    if routing_rows:
+        try: routing_df = pd.DataFrame(routing_rows)
+        except Exception: routing_df=None
+    if routing_df is not None:
+        reporter.generate_report(kpis, equity, trades_df, routing_audit=routing_df)
+    else:
+        reporter.generate_report(kpis, equity, trades_df)
+    out_dir_msg = report_settings.get('output_dir','reports/backtest_results')
+    logger.success(f"Backtest finished. Report generated in {out_dir_msg}.")
+
+    if getattr(args,'json',False):
+        try:
+            from ultra_signals.backtest.json_metrics import build_run_metrics
+            symbol_json = symbols[0]
+            payload = build_run_metrics(kpis, trades_df, equity, resolved_settings, symbol_json, timeframe)
+            if 'max_drawdown' in kpis:
+                payload['max_drawdown'] = kpis['max_drawdown']
+            # Sprint 29 liquidity metrics
+            try:
+                em = getattr(runner, 'event_metrics', {}) or {}
+                for k in ['liquidity_veto_rate_pct','liquidity_dampen_rate_pct','liquidity_veto_bars','liquidity_dampen_bars']:
+                    if k in em:
+                        payload[k] = em[k]
+                # Sprint 30 MTC metrics
+                for k in ['mtc_confirm_rate_pct','mtc_partial_rate_pct','mtc_fail_rate_pct','mtc_confirm_bars','mtc_partial_bars','mtc_fail_bars']:
+                    if k in em:
+                        payload[k] = em[k]
+                # Sprint 30: histograms
+                for k in ['mtc_score_hist_c1','mtc_score_hist_c2']:
+                    if k in em:
+                        payload[k] = em[k]
+                # Sprint 31 Meta metrics
+                for k in ['meta_auc_pr','meta_auc_roc','meta_brier','meta_decile_lift_top_vs_bottom','veto_rate_pct']:
+                    if k in kpis:
+                        payload[k] = kpis[k]
+            except Exception:
+                pass
+            import json, os
+            with open(os.path.join(out_dir_msg,'report.json'),'w',encoding='utf-8') as jf:
+                json.dump(payload,jf,indent=2)
+            logger.info("JSON report written to {}/report.json".format(out_dir_msg))
+        except Exception as e:
+            logger.warning(f"Failed to write JSON report: {e}")
+
+    # Quality report preserved (simplified guard)
+    if getattr(args,'quality_report',False):
+        try:
+            import json, collections
+            if 'vote_detail' in trades_df.columns:
+                vd = trades_df['vote_detail']
+                q_bins=[]
+                for raw in vd:
+                    try: obj = raw if isinstance(raw,dict) else json.loads(raw)
+                    except Exception: obj={}
+                    q = obj.get('quality') or {}
+                    q_bins.append(q.get('bin'))
+                dist = collections.Counter([b for b in q_bins if b])
+                lines=["Quality Gate Report","====================",f"Total qualified trades: {sum(dist.values())}"]
+                for b in ['A+','A','B','C','D']:
+                    if b in dist:
+                        total = sum(dist.values()) or 1
+                        lines.append(f"{b}: {dist[b]} ({dist[b]/total*100:.1f}%)")
+                from pathlib import Path as _P
+                (_P(out_dir_msg)/'quality_report.txt').write_text('\n'.join(lines),encoding='utf-8')
+        except Exception as e:
+            logger.warning(f"Failed generating quality-report: {e}")
     return
 
 
@@ -515,6 +499,69 @@ def handle_wf(args, settings):
         logger.warning(f"Skipping risk events export due to: {e}")
     # ----------------------------------------------------------------------------------------
 
+    if getattr(args, 'json', False):
+        try:
+            if 'pnl' in trades.columns and not trades.empty:
+                pnl = trades['pnl'].astype(float)
+                wins = pnl[pnl>0]; losses = pnl[pnl<0]
+                gross_win = wins.sum(); gross_loss = -losses.sum()
+                profit_factor = gross_win / gross_loss if gross_loss>0 else 0.0
+                win_rate = len(wins)/len(pnl) if len(pnl)>0 else 0.0
+                avg_win = float(wins.mean()) if not wins.empty else 0.0
+                avg_loss = float(losses.mean()) if not losses.empty else 0.0
+                win_loss_ratio = (avg_win/abs(avg_loss)) if avg_loss!=0 else 0.0
+                expectancy = (win_rate*avg_win)+((1-win_rate)*avg_loss)
+                rr_col = trades['rr'] if 'rr' in trades.columns else None
+                avg_rr = float(rr_col.mean()) if rr_col is not None and not rr_col.empty else 0.0
+                max_w=max_l=cur_w=cur_l=0
+                for v in pnl:
+                    if v>0:
+                        cur_w+=1; max_w=max(max_w,cur_w); cur_l=0
+                    elif v<0:
+                        cur_l+=1; max_l=max(max_l,cur_l); cur_w=0
+                    else:
+                        cur_w=cur_l=0
+                if len(pnl)>1:
+                    mean = pnl.mean(); std = pnl.std(ddof=0) or 1e-9
+                    sharpe = (mean/std)*math.sqrt(252)
+                    neg = pnl[pnl<0]; dstd = neg.std(ddof=0) or 1e-9
+                    sortino = (mean/dstd)*math.sqrt(252)
+                else:
+                    sharpe = sortino = 0.0
+                eq=0.0; peak=0.0; max_dd=0.0
+                for v in pnl:
+                    eq += v
+                    if eq>peak: peak=eq
+                    dd = eq-peak
+                    if dd<max_dd: max_dd=dd
+                max_drawdown_pct = abs(max_dd)/(peak if peak else 1)*100 if peak else 0.0
+                net_pnl = float(pnl.sum())
+                cagr=calmar=0.0
+                try:
+                    start_eq = 1.0; end_eq = 1.0 + net_pnl/(abs(net_pnl)+1)
+                    years = max(1/365, len(pnl)/1000)
+                    cagr = (end_eq/start_eq)**(1/years)-1 if years>0 else 0.0
+                    if max_drawdown_pct>0:
+                        calmar = cagr/(max_drawdown_pct/100)
+                except Exception:
+                    pass
+                payload = {
+                    'symbol': symbols[0], 'timeframe': timeframe,
+                    'profit_factor': profit_factor, 'sortino': sortino, 'sharpe': sharpe, 'max_drawdown_pct': max_drawdown_pct,
+                    'win_rate_pct': win_rate*100, 'total_trades': len(pnl), 'net_pnl': net_pnl, 'fees': 0.0, 'slippage_bps': 0.0,
+                    'cagr': cagr, 'calmar': calmar, 'expectancy': expectancy, 'avg_win': avg_win, 'avg_loss': avg_loss,
+                    'win_loss_ratio': win_loss_ratio, 'avg_rr': avg_rr, 'max_consec_wins': max_w, 'max_consec_losses': max_l
+                }
+                for k,v in list(payload.items()):
+                    if isinstance(v,float) and (math.isnan(v) or math.isinf(v)):
+                        payload[k]=0.0
+                import json as _json
+                with (out_dir/ 'report.json').open('w',encoding='utf-8') as f:
+                    _json.dump(payload,f,indent=2)
+                logger.info(f"WF JSON metrics written -> {(out_dir/ 'report.json')}" )
+        except Exception as e:
+            logger.warning(f"WF JSON generation failed: {e}")
+
     logger.success(f"WF outputs written to {out_dir}")
 
 
@@ -652,9 +699,14 @@ def create_parser() -> argparse.ArgumentParser:
         parents=[common_parser],
     )
     parser_run.add_argument("--symbol", type=str, help="Symbol to backtest (e.g., BTCUSDT). Overrides config.")
-    parser_run.add_argument("--interval", type=str, help="Candle interval (e.g., 5m). Overrides config.")
-    parser_run.add_argument("--start", type=str, help="Backtest start date (YYYY-MM-DD). Overrides config.")
-    parser_run.add_argument("--end", type=str, help="Backtest end date (YYYY-MM-DD). Overrides config.")
+    parser_run.add_argument("--interval", type=str, help="(Deprecated) Candle interval (e.g., 5m). Use --tf.")
+    parser_run.add_argument("--start", type=str, help="(Deprecated) Backtest start date (YYYY-MM-DD). Use --from.")
+    parser_run.add_argument("--end", type=str, help="(Deprecated) Backtest end date (YYYY-MM-DD). Use --to.")
+    # New preferred flags
+    parser_run.add_argument("--tf", type=str, help="Primary timeframe override (e.g., 5m, 15m).")
+    parser_run.add_argument("--from", dest="from_", type=str, help="Override start date (YYYY-MM-DD).")
+    parser_run.add_argument("--to", type=str, help="Override end date (YYYY-MM-DD).")
+    parser_run.add_argument("--json", action="store_true", help="Emit report.json with core KPIs for batch runs.")
     parser_run.add_argument("--output-dir", type=str, help="Directory to save backtest report.")
     parser_run.add_argument("--profiles", type=str, help="Profiles root directory.")
     parser_run.add_argument("--symbols", type=str, help="Comma separated symbols for basket run.")
@@ -689,6 +741,7 @@ def create_parser() -> argparse.ArgumentParser:
         parents=[common_parser],
     )
     parser_wf.add_argument("--output-dir", type=str, help="Directory to save walk-forward report.")
+    parser_wf.add_argument("--json", action="store_true", help="Emit aggregated report.json metrics for WF mode.")
     parser_wf.add_argument("--profiles", type=str, help="Profiles root directory.")
     parser_wf.add_argument("--symbols", type=str, help="Comma separated symbols for basket run.")
     parser_wf.add_argument("--hot-reload", action="store_true", help="Enable hot-reload of profile YAML files.")

@@ -1,0 +1,9 @@
+{
+  "TESTSYM__1m": {
+    "meta": {
+      "model_id": "ewma_fallback",
+      "ewma_var": 3.270288331763661e-06
+    },
+    "last_refit_ts": "2025-08-28T19:50:40.698321"
+  }
+}

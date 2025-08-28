@@ -43,3 +43,41 @@ meta_scorer:
   negative_sampling:
     ratio: 1.0  # 1 negative per positive
     max: 100
+
+# Sentiment default config (topic-aware)
+sentiment:
+  enabled: true
+  cache_dir: ".cache/sentiment"
+  symbols: ["BTCUSDT","ETHUSDT"]
+  sources:
+    twitter: { enabled: true, refresh_sec: 900 }
+    reddit: { enabled: true, refresh_sec: 900 }
+    telegram: { enabled: false }
+    funding: { enabled: true, refresh_sec: 900 }
+  source_weights:
+    influencer: 3.0
+    twitter: 1.5
+    reddit: 1.0
+    telegram: 0.8
+    news: 0.7
+  influencers: {}
+  topic_taxonomy_path: null
+  funding_threshold: 0.0003
+  oi_threshold_pct: 0.02
+  extremes: { z_threshold: 2.0 }
+  telemetry: { emit_metrics: true, interval_sec: 300 }
+
+# Example: register emitted topic features with Meta-Scorer stacker mapping (S31)
+meta_scorer:
+  enabled: true
+  input_features:
+    - sent_topic_etf_regulation_score_s
+    - sent_topic_etf_regulation_z
+    - sent_topic_etf_regulation_pctl
+    - sent_topic_hack_exploit_score_s
+    - sent_topic_meme_retail_score_s
+    - sent_vs_funding_div_long
+    - sent_vs_funding_div_short
+    - contrarian_flag_long
+    - contrarian_flag_short
+  missing_policy: SAFE

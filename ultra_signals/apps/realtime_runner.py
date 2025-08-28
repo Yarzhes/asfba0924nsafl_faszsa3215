@@ -46,6 +46,7 @@ from ultra_signals.engine.entries_exits import make_signal
 from ultra_signals.engine.risk_filters import apply_filters
 from ultra_signals.engine.sizing import determine_position_size
 from ultra_signals.transport.telegram import format_message, send_message
+from ultra_signals.live.metrics import Metrics
 
 
 async def main_loop():
@@ -101,6 +102,9 @@ async def main_loop():
     # State management for new features
     book_flip_states = defaultdict(BookFlipState)
     cvd_states = defaultdict(CvdState)
+
+    # lightweight runtime metrics collector (used to surface pre-trade summaries)
+    metrics = Metrics()
 
     logger.info("Application starting up...")
     logger.info(f"Using FeatureStore id={id(feature_store)} for all realtime computations")
@@ -162,9 +166,13 @@ async def main_loop():
 
             # --- 5b. Live features (Orderbook, Derivatives) ---
             orderbook_features = compute_orderbook_features(feature_store, kline.symbol)
-            derivatives_features = compute_derivatives_features(
-                feature_store, kline.symbol
-            )
+            # New: compute richer derivatives posture where available (funding, OI, basis)
+            try:
+                from ultra_signals.features.derivatives_posture import compute_derivatives_posture
+                derivatives_features = compute_derivatives_posture(feature_store, kline.symbol)
+            except Exception:
+                # fallback to legacy lightweight derivatives features
+                derivatives_features = compute_derivatives_features(feature_store, kline.symbol)
             funding_features = compute_funding_features(feature_store, kline.symbol)
 
             # --- 5c. V2 Features ---
@@ -219,12 +227,45 @@ async def main_loop():
                 logger.info(
                     f"Signal for {signal.symbol} blocked by risk filter: {risk_result.reason}"
                 )
+                
+                # Track sniper rejections in metrics
+                if hasattr(metrics, 'inc_sniper_rejection') and risk_result.reason and 'SNIPER' in risk_result.reason:
+                    metrics.inc_sniper_rejection(risk_result.reason)
+                
                 continue
 
             sized_signal = determine_position_size(signal, settings.model_dump())
 
             # --- 8. Transport / Notification ---
             if sized_signal.decision != "NO_TRADE":
+                # build a compact pre-trade summary for telemetry/transport
+                try:
+                    pwin = float(sized_signal.confidence)
+                except Exception:
+                    pwin = None
+                try:
+                    regime = None
+                    vd = sized_signal.vote_detail or {}
+                    if isinstance(vd, dict):
+                        rg = vd.get('regime') or {}
+                        if isinstance(rg, dict):
+                            regime = rg.get('regime_label') or rg.get('label')
+                except Exception:
+                    regime = None
+                pre = {
+                    "p_win": pwin,
+                    "regime": regime,
+                    "veto_count": len(getattr(sized_signal, 'vetoes', []) or []),
+                    "lat_ms": metrics.latency_tick_to_decision.snapshot(),
+                }
+                # expose on metrics and on the decision for transport formatters
+                metrics.set_pre_trade_summary(pre)
+                try:
+                    if isinstance(sized_signal.vote_detail, dict):
+                        sized_signal.vote_detail['pre_trade'] = pre
+                except Exception:
+                    pass
+
                 message = format_message(sized_signal, settings.model_dump())
                 print("\n" + message + "\n")  # Also print to console
 

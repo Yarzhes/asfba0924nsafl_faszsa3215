@@ -67,3 +67,22 @@ runtime:
   cache_data: true
   save_study_db: true
   save_topk: 10
+
+# Default pattern detection configuration (Sprint 66)
+patterns:
+  enabled: true
+  pivots:
+    fractal_k: 2
+  geom:
+    # min R^2 for regression fits (0 disables R^2 gating)
+    min_r2: 0.0
+  triangle:
+    min_pivots: 3
+  wedge:
+    min_pivots: 3
+  flag:
+    run_pct_min: 0.03
+    band_max: 0.02
+  cup:
+    min_length: 9
+    handle_proximity: 0.9

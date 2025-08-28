@@ -1,0 +1,153 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "Ultra Signals - Sniper Mode Monitoring",
+    "tags": ["ultra-signals", "sniper-mode", "trading"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Sniper Rejections Over Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(sniper_hourly_cap_total[5m])",
+            "legendFormat": "Hourly Cap Rejections/min",
+            "refId": "A"
+          },
+          {
+            "expr": "rate(sniper_daily_cap_total[5m])",
+            "legendFormat": "Daily Cap Rejections/min",
+            "refId": "B"
+          },
+          {
+            "expr": "rate(sniper_mtf_required_total[5m])",
+            "legendFormat": "MTF Required Rejections/min",
+            "refId": "C"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Rejections/minute",
+            "min": 0
+          }
+        ],
+        "xAxis": {
+          "mode": "time"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": 2,
+        "title": "Current Signal Counts",
+        "type": "singlestat",
+        "targets": [
+          {
+            "expr": "sniper_hourly_cap_total",
+            "legendFormat": "Hourly Rejections",
+            "refId": "A"
+          }
+        ],
+        "valueName": "current",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 12,
+          "y": 0
+        },
+        "thresholds": "10,20",
+        "colors": ["#299c46", "#e5ac0e", "#d44a3a"]
+      },
+      {
+        "id": 3,
+        "title": "Daily Signal Count",
+        "type": "singlestat",
+        "targets": [
+          {
+            "expr": "sniper_daily_cap_total",
+            "legendFormat": "Daily Rejections",
+            "refId": "A"
+          }
+        ],
+        "valueName": "current",
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 18,
+          "y": 0
+        },
+        "thresholds": "20,50",
+        "colors": ["#299c46", "#e5ac0e", "#d44a3a"]
+      },
+      {
+        "id": 4,
+        "title": "Latency Metrics",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "latency_tick_to_decision{quantile=\"0.5\"}",
+            "legendFormat": "Tick to Decision P50 (ms)",
+            "refId": "A"
+          },
+          {
+            "expr": "latency_tick_to_decision{quantile=\"0.9\"}",
+            "legendFormat": "Tick to Decision P90 (ms)",
+            "refId": "B"
+          },
+          {
+            "expr": "latency_decision_to_order{quantile=\"0.5\"}",
+            "legendFormat": "Decision to Order P50 (ms)",
+            "refId": "C"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Latency (ms)",
+            "min": 0
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 8
+        }
+      },
+      {
+        "id": 5,
+        "title": "Orders vs Rejections",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "orders_sent_total",
+            "legendFormat": "Orders Sent",
+            "refId": "A"
+          },
+          {
+            "expr": "sniper_hourly_cap_total + sniper_daily_cap_total + sniper_mtf_required_total",
+            "legendFormat": "Total Sniper Rejections",
+            "refId": "B"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 8
+        },
+        "displayMode": "table",
+        "colorMode": "value"
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "30s"
+  }
+}

@@ -1,0 +1,23 @@
+# FeatureView manifest for topic-aware sentiment features
+# Lists emitted keys and brief descriptions.
+features:
+  - name: sent_topic_{topic}_score_s
+    desc: "Short-horizon topic sentiment score (weighted, -1..1)."
+  - name: sent_topic_{topic}_z
+    desc: "Z-score of topic short sentiment vs historical baseline."
+  - name: sent_topic_{topic}_pctl
+    desc: "Percentile (0-100) mapping of topic z-score (tanh->pct)."
+  - name: sent_vs_funding_div_long
+    desc: "Divergence score: bullish social + negative funding (0..1)."
+  - name: sent_vs_funding_div_short
+    desc: "Divergence score: bearish social + positive funding (0..1)."
+  - name: contrarian_flag_long
+    desc: "Flag (0/1) indicating contrarian long candidate from divergence rules."
+  - name: contrarian_flag_short
+    desc: "Flag (0/1) indicating contrarian short candidate from divergence rules."
+  - name: euphoria_flag
+    desc: "(Optional) high-euphoria indicator derived from topic pctl + OI build-up."
+  - name: explain_top_topic
+    desc: "Top topic label for explainability (string)."
+  - name: explain_examples_ids
+    desc: "Representative example post IDs (list of strings) for audits."

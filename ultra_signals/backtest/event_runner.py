@@ -330,6 +330,85 @@ class EventRunner:
             logger.error("No data loaded, cannot run backtest.")
             return self.portfolio.trades, self.portfolio.equity_curve
 
+        # ---------------------------------------------------------------------------------
+        # Optional: Funding / OI replay (load exported CSV and inject into FeatureStore
+        # and FundingProvider cache so compute_derivatives_posture can operate in backtests)
+        try:
+            fr_cfg = (self.settings.get('backtest') or {}).get('funding_replay', {}) or {}
+            enabled = bool(fr_cfg.get('enabled', True))
+            if enabled:
+                import os, pandas as _pd
+                # priority: explicit path in backtest.funding_replay.path -> backtest.output_dir -> default file
+                path = fr_cfg.get('path') or ((self.settings.get('backtest') or {}).get('output_dir')) or 'funding_export.csv'
+                if os.path.isfile(path):
+                    try:
+                        df = _pd.read_csv(path)
+                        if not df.empty:
+                            # normalize timestamp column to ms epoch
+                            if 'ts' in df.columns:
+                                df['funding_time'] = _pd.to_datetime(df['ts'], unit='ms', errors='coerce')
+                            elif 'funding_time' in df.columns:
+                                try:
+                                    df['funding_time'] = _pd.to_datetime(df['funding_time'], unit='ms', errors='raise')
+                                except Exception:
+                                    df['funding_time'] = _pd.to_datetime(df['funding_time'], errors='coerce')
+                            else:
+                                # fall back to any timestamp-like column or index
+                                ts_candidates = [c for c in df.columns if 'time' in c.lower() or 'timestamp' in c.lower()]
+                                if ts_candidates:
+                                    df['funding_time'] = _pd.to_datetime(df[ts_candidates[0]], errors='coerce')
+                                else:
+                                    try:
+                                        df = df.reset_index()
+                                        df['funding_time'] = _pd.to_datetime(df['index'], errors='coerce')
+                                    except Exception:
+                                        df['funding_time'] = _pd.NaT
+
+                            # derive ms integer and build per-symbol lists
+                            df['funding_time_ms'] = (df['funding_time'].astype('int64') // 1_000_000).astype('Int64')
+                            grouped = {}
+                            for _, r in df.iterrows():
+                                sym = str(r.get('symbol') or r.get('sym') or '').strip()
+                                if not sym:
+                                    continue
+                                fr = float(r.get('funding_rate') or r.get('fund') or 0.0)
+                                oi = None
+                                try:
+                                    oi = float(r.get('oi_notional') if r.get('oi_notional') is not None else r.get('oi') if r.get('oi') is not None else 0.0)
+                                except Exception:
+                                    oi = None
+                                venue = r.get('venue') or r.get('exchange') or 'unknown'
+                                ts_ms = int(r.get('funding_time_ms') or 0)
+                                item = {'funding_rate': fr, 'funding_time': ts_ms, 'venue': venue}
+                                if oi is not None:
+                                    item['oi_notional'] = oi
+                                grouped.setdefault(sym, []).append(item)
+                                # buffer into store's macro export buffer for traceability
+                                try:
+                                    self.feature_store._buffer_funding_row({'symbol': sym, 'ts': ts_ms, 'funding_rate': fr, 'oi_notional': oi, 'venue': venue})
+                                except Exception:
+                                    pass
+
+                            # inject into FundingProvider cache if present (override existing cache for replay)
+                            fp = getattr(self.feature_store, '_funding_provider', None)
+                            if fp is not None:
+                                try:
+                                    for s, lst in grouped.items():
+                                        lst_sorted = sorted(lst, key=lambda x: int(x.get('funding_time', 0)))
+                                        # use provider API if available
+                                        lr = getattr(fp, 'load_replay', None)
+                                        if callable(lr):
+                                            lr(s, lst_sorted)
+                                        else:
+                                            fp._cache[s] = lst_sorted
+                                except Exception:
+                                    pass
+                    except Exception:
+                        logger.debug('Funding replay load failed or file malformed; skipping funding replay')
+        except Exception:
+            pass
+        # ---------------------------------------------------------------------------------
+
         # Event metrics buckets
         self._event_metrics = {
             'bars': 0,
@@ -732,6 +811,12 @@ class EventRunner:
         bar_with_timestamp = bar.to_frame().T
         bar_with_timestamp["timestamp"] = timestamp
         self.feature_store.on_bar(symbol, timeframe, bar_with_timestamp)
+        # Ensure DC integration hook registered (idempotent)
+        try:
+            from ultra_signals.dc.integration import register_with_store
+            register_with_store(self.feature_store)
+        except Exception:
+            pass
         # Sprint 29: if no real BookHealth snapshot present, compute proxy from latest features
         try:
             get_bh = getattr(self.feature_store, 'get_latest_book_health', None)

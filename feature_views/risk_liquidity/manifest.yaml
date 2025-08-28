@@ -1,0 +1,27 @@
+name: risk_liquidity
+description: Liquidity-adjusted risk outputs per trade and portfolio (L-VaR, liquidation cost, TTL, exec hints)
+fields:
+  - name: lvar_$
+    type: float
+    desc: Liquidity-adjusted VaR in USD
+  - name: lvar_pct_equity
+    type: float
+    desc: L-VaR as fraction of equity
+  - name: liq_cost_$
+    type: float
+    desc: Estimated expected liquidation cost in USD
+  - name: ttl_minutes
+    type: float
+    desc: Estimated time to liquidate in minutes at configured PR
+  - name: stress_factor
+    type: float
+    desc: Applied stress multiplier
+  - name: size_suggested_mult
+    type: float
+    desc: Suggested size multiplier from liquidity policy
+  - name: exec_style_hint
+    type: string
+    desc: Suggested execution style (MARKET|TWAP|PASSIVE|VETO)
+  - name: exec_reason
+    type: string
+    desc: Reason code for suggestion

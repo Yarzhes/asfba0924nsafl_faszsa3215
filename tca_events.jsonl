@@ -1,0 +1,3 @@
+{"ts": 1756393477669, "venue": "V1", "symbol": "SYM", "slip_bps": 1.999999999999602, "filled_qty": 1.0, "requested_qty": 1.0, "latency_ms": 50.0, "order_type": null}
+{"ts": 1756393477781, "venue": "V1", "symbol": "SYM", "slip_bps": 3.0000000000001137, "filled_qty": 1.0, "requested_qty": 1.0, "latency_ms": 50.0, "order_type": null}
+{"ts": 1756393477889, "venue": "V1", "symbol": "SYM", "slip_bps": 3.999999999999204, "filled_qty": 1.0, "requested_qty": 1.0, "latency_ms": 50.0, "order_type": null}

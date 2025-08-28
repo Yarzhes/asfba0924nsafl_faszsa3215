@@ -26,7 +26,12 @@ class BrokerRouterAdapter:
         seed = int(sim_cfg.get('rng_seed', 42))
         # Single venue synthetic for now (extend to multi by symbol mapping later)
         ob = SyntheticOrderBook('GENERIC', levels=((sim_cfg.get('orderbook') or {}).get('levels',10)))
-        self.sim = BrokerSim(sim_cfg, ob, rng_seed=seed)
+        # If a FeatureStore instance is provided via settings, wire its lambda provider
+        fs = settings.get('feature_store') if isinstance(settings, dict) else None
+        lambda_provider = None
+        if fs is not None and hasattr(fs, 'get_lambda_for'):
+            lambda_provider = fs.get_lambda_for
+        self.sim = BrokerSim(sim_cfg, ob, rng_seed=seed, lambda_provider=lambda_provider)
         self.settings = settings
 
     def execute_fast_order(self, *, symbol: str, side: Literal['LONG','SHORT'], size: float, price: float|None, settings: Dict[str, Any], quotes: Optional[Dict[str, Dict[str,float]]]=None) -> SimExecResult:

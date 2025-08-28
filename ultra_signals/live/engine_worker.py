@@ -11,6 +11,8 @@ import time
 from typing import Dict, Any, Optional
 from loguru import logger
 from ultra_signals.core.events import KlineEvent, MarketEvent, BookTickerEvent
+from ultra_signals.core.events import AggTradeEvent
+from ultra_signals.features.vpin import VPINEngine, fuse_toxicity
 try:
     from ultra_signals.guards.live_guards import pre_bar_guard
 except Exception:  # pragma: no cover
@@ -32,14 +34,25 @@ except Exception:  # pragma: no cover
 
 
 class EngineWorker:
-    def __init__(self, in_queue: asyncio.Queue, out_queue: asyncio.Queue, latency_budget_ms: int = 150, metrics=None, safety=None, extra_delay_ms: int = 0):
+    def __init__(self, in_queue: asyncio.Queue, out_queue: asyncio.Queue, latency_budget_ms: int = 150, metrics=None, safety=None, extra_delay_ms: int = 0, feature_writer=None):
         self.in_queue = in_queue
         self.out_queue = out_queue
         self.latency_budget_ms = latency_budget_ms
         self._running = False
+        # injected helpers / test hooks
         self.metrics = metrics
         self.safety = safety
         self.extra_delay_ms = extra_delay_ms  # for tests to force deadline breach
+        # optional feature writer for persisting per-slice telemetry
+        self.feature_writer = feature_writer
+        # optional references set by runner
+        self.feed_ref = None
+        self._settings = None
+        self._exec_cfg = None
+        # per-symbol VPIN engines (live incremental)
+        self._vpin_engines = {}
+        # vpin per-symbol transient state (normal, toxic, cooldown)
+        self._vpin_states = {}
 
     async def run(self):
         self._running = True
@@ -118,6 +131,27 @@ class EngineWorker:
                                     cur_spread = spreads[-1]
                                     if med>0 and cur_spread/med >= 2.0:
                                         self._cascade_flag_until = time.perf_counter() + 0.8
+                except Exception:
+                    pass
+                continue
+            # ingest aggTrade events into local VPIN engines for realtime toxicity estimation
+            if isinstance(evt, AggTradeEvent):
+                try:
+                    sym = evt.symbol
+                    eng = self._vpin_engines.get(sym)
+                    if eng is None:
+                        # read default bucket from feed settings if available
+                        try:
+                            cfg = getattr(self.feed_ref, 'settings', {})
+                            vcfg = ((cfg or {}).get('features', {}) or {}).get('vpin', {})
+                            V_bucket = float(vcfg.get('V_bucket', 250000))
+                            K_buckets = int(vcfg.get('K_buckets', 50))
+                        except Exception:
+                            V_bucket = 250000.0; K_buckets = 50
+                        eng = VPINEngine(V_bucket=V_bucket, K_buckets=K_buckets)
+                        self._vpin_engines[sym] = eng
+                    # convert to tuple (ts, price, qty, is_buyer_maker)
+                    eng.ingest_trade((evt.timestamp, float(evt.price), float(evt.quantity), bool(getattr(evt, 'is_buyer_maker', False))), book_top=(getattr(self,'_last_bidask', None) and {'bid': self._last_bidask[1], 'ask': self._last_bidask[2], 'B': 0.0, 'A': 0.0}))
                 except Exception:
                     pass
                 continue
@@ -244,6 +278,137 @@ class EngineWorker:
                 except Exception:
                     pass
                 try:
+                    # Apply VPIN toxicity policy (veto/resize) if present
+                    try:
+                        sym = plan.get('symbol')
+                        eng = self._vpin_engines.get(sym)
+                        if eng is not None:
+                            v = eng.get_latest_vpin()
+                            pctl = float(v.get('vpin_pctl', 0.0))
+                            # read policy from feed settings if available
+                            try:
+                                cfg = getattr(self.feed_ref, 'settings', {})
+                                vcfg = ((cfg or {}).get('features', {}) or {}).get('vpin', {})
+                                pol = (vcfg.get('policy', {}) or {}).get('mode', vcfg.get('mode', 'veto'))
+                                size_mult_cfg = float((vcfg.get('policy', {}) or {}).get('size_mult', 0.5))
+                                hi = float((vcfg.get('policy', {}) or {}).get('hi_th', vcfg.get('hi_th', 0.85)))
+                                lo = float((vcfg.get('policy', {}) or {}).get('lo_th', vcfg.get('lo_th', 0.7)))
+                            except Exception:
+                                pol = 'veto'; size_mult_cfg = 0.5; hi = 0.85; lo = 0.7
+                            prev = self._vpin_states.get(sym, 'normal')
+                            # hysteresis transitions
+                            if prev != 'toxic' and pctl >= hi:
+                                self._vpin_states[sym] = 'toxic'
+                                prev = 'toxic'
+                            elif prev == 'toxic' and pctl <= lo:
+                                self._vpin_states[sym] = 'cooldown'
+                                prev = 'cooldown'
+                            # enforce policy
+                            if prev == 'toxic':
+                                if pol.lower() == 'veto':
+                                    logger.warning(f"[EngineWorker][VPIN] vetoing plan for {sym} pctl={pctl:.2f}")
+                                    # increment metric if available
+                                    if self.metrics and hasattr(self.metrics, 'inc'):
+                                        try:
+                                            self.metrics.inc('vpin_veto')
+                                        except Exception:
+                                            pass
+                                    continue
+                                elif pol.lower() == 'resize':
+                                    plan['size_mult'] = float(plan.get('size_mult', 1.0)) * size_mult_cfg
+                    except Exception:
+                        pass
+                    # If plan requests VWAP child_algo, perform slicing and enqueue child orders
+                    try:
+                        if plan.get('child_algo') == 'VWAP':
+                            # lazy import to avoid top-level dependency
+                            from ultra_signals.routing.vwap_adapter import VWAPExecutor
+                            from ultra_signals.routing.types import VenueInfo
+                            symbol = plan.get('symbol')
+                            child_notional = float((plan.get('vwap_cfg') or {}).get('child_notional') or plan.get('child_notional') or plan.get('size') or 0.0)
+                            if child_notional <= 0:
+                                # nothing to do
+                                self.out_queue.put_nowait(plan)
+                            else:
+                                # build venues mapping from venue_router if available
+                                venues_map = {}
+                                try:
+                                    vr = getattr(self.feed_ref, 'venue_router', None)
+                                    if vr and hasattr(vr, 'venues'):
+                                        for vid, adapter in vr.venues.items():
+                                            # best-effort fee extraction
+                                            fee = 0.0
+                                            try:
+                                                fee = float(getattr(adapter, 'taker_fee', 0.0) or 0.0)
+                                            except Exception:
+                                                fee = 0.0
+                                            venues_map[vid] = VenueInfo(vid, maker_bps=0.0, taker_bps=fee, min_notional=1.0, lot_size=0.0001)
+                                except Exception:
+                                    venues_map = {}
+                                vcfg = plan.get('vwap_cfg') or {}
+                                vexec = VWAPExecutor(venues_map, volume_curve=vcfg.get('volume_curve'), pr_cap=float(vcfg.get('pr_cap', 0.1)), jitter_frac=float(vcfg.get('jitter_frac', 0.05)), max_slice_notional=vcfg.get('max_slice_notional'), feature_writer=self.feature_writer)
+                                # optional feature provider: attempt to read lightweight features from feed_ref if present
+                                def feat_provider(sym):
+                                    try:
+                                        # feed_ref may expose a small feature view cache
+                                        ff = getattr(self.feed_ref, 'feature_view', None)
+                                        if callable(ff):
+                                            return ff().get(sym) or {}
+                                    except Exception:
+                                        pass
+                                    return {}
+                                vexec.feature_provider = feat_provider
+                                # execute slices
+                                slices = vexec.execute(self.feed_ref, plan.get('side','LONG'), child_notional, symbol)
+                                # enqueue each slice as one or more venue child plans based on allocation
+                                for sl in slices:
+                                    alloc = sl.get('router_allocation') or {}
+                                    slice_id = sl.get('slice_id')
+                                    expected_cost = sl.get('expected_cost_bps')
+                                    # expected_price may be present in sl['router_decision'] if router provided; else None
+                                    expected_price = None
+                                    rd = sl.get('router_decision')
+                                    if rd and hasattr(rd, 'expected_price'):
+                                        expected_price = getattr(rd, 'expected_price')
+                                    # if allocation only a single venue, create one child
+                                    if not alloc:
+                                        child = {
+                                            'ts': int(time.time()),
+                                            'symbol': symbol,
+                                            'side': plan.get('side'),
+                                            'size': sl.get('slice_notional'),
+                                            'price': expected_price,
+                                            'parent_id': plan.get('ts'),
+                                            'slice_id': slice_id,
+                                            'exec_plan': {'order_type': 'MARKET' if sl.get('style') == 'MARKET' else 'LIMIT', 'post_only': True if sl.get('style') == 'LIMIT' else False, 'expected_cost_bps': expected_cost, 'expected_price': expected_price},
+                                        }
+                                        try:
+                                            self.out_queue.put_nowait(child)
+                                        except asyncio.QueueFull:
+                                            logger.error('[EngineWorker] order queue full when enqueueing VWAP child')
+                                    else:
+                                        for vid, pct in alloc.items():
+                                            child = {
+                                                'ts': int(time.time()),
+                                                'symbol': symbol,
+                                                'side': plan.get('side'),
+                                                'size': sl.get('slice_notional') * float(pct),
+                                                'price': expected_price,
+                                                'parent_id': plan.get('ts'),
+                                                'slice_id': slice_id,
+                                                'venue': vid,
+                                                'exec_plan': {'order_type': 'MARKET' if sl.get('style') == 'MARKET' else 'LIMIT', 'post_only': True if sl.get('style') == 'LIMIT' else False, 'expected_cost_bps': expected_cost, 'expected_price': expected_price},
+                                            }
+                                            try:
+                                                self.out_queue.put_nowait(child)
+                                            except asyncio.QueueFull:
+                                                logger.error('[EngineWorker] order queue full when enqueueing VWAP child')
+                                # also persist the parent plan for bookkeeping
+                                self.out_queue.put_nowait(plan)
+                            continue
+                    except Exception:
+                        # if anything goes wrong, fall back to emitting the original plan
+                        pass
                     self.out_queue.put_nowait(plan)
                 except asyncio.QueueFull:
                     logger.error("[EngineWorker] order queue full; dropping plan")

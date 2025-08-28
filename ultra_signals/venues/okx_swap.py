@@ -1,4 +1,7 @@
-"""OKX swap adapter (stub)."""
+"""OKX swap adapter (stub) rewritten to remove indentation anomalies.
+
+Adds a slight negative offset to synthetic mid for cross-venue spread tests.
+"""
 from __future__ import annotations
 import time, random
 from typing import Dict, Any, List
@@ -22,8 +25,11 @@ class OKXSwapPaper(ExchangeVenue):
         return []
 
     async def get_orderbook_top(self, symbol: str) -> BookTop:
-        px = 50000.0 if symbol.startswith("BTC") else 2500.0
-        return BookTop(bid=px-1.2, bid_size=3.5, ask=px+1.2, ask_size=3.3, ts=int(time.time()*1000))
+        base = 50000.0 if symbol.startswith("BTC") else 2500.0
+        px = base - 2.0  # downward offset vs baseline
+        bid = px - 1.2
+        ask = px + 1.2
+        return BookTop(bid=bid, bid_size=3.5, ask=ask, ask_size=3.3, ts=int(time.time()*1000))
 
     async def place_order(self, plan: Dict[str, Any], client_order_id: str) -> OrderAck:
         await self.bucket.take()

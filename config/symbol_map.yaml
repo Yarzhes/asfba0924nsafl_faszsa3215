@@ -6,3 +6,75 @@ ETHUSDT:
   venues: { BINANCE: "ETHUSDT", BYBIT: "ETHUSDT", OKX: "ETH-USDT-SWAP" }
   type: "perp"
   quote: "USDT"
+SOLUSDT:
+  venues: { BINANCE: "SOLUSDT", BYBIT: "SOLUSDT", OKX: "SOL-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+BNBUSDT:
+  venues: { BINANCE: "BNBUSDT", BYBIT: "BNBUSDT", OKX: "BNB-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+XRPUSDT:
+  venues: { BINANCE: "XRPUSDT", BYBIT: "XRPUSDT", OKX: "XRP-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+DOGEUSDT:
+  venues: { BINANCE: "DOGEUSDT", BYBIT: "DOGEUSDT", OKX: "DOGE-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+ADAUSDT:
+  venues: { BINANCE: "ADAUSDT", BYBIT: "ADAUSDT", OKX: "ADA-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+AVAXUSDT:
+  venues: { BINANCE: "AVAXUSDT", BYBIT: "AVAXUSDT", OKX: "AVAX-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+LINKUSDT:
+  venues: { BINANCE: "LINKUSDT", BYBIT: "LINKUSDT", OKX: "LINK-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+TONUSDT:
+  venues: { BINANCE: "TONUSDT", BYBIT: "TONUSDT", OKX: "TON-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+TRXUSDT:
+  venues: { BINANCE: "TRXUSDT", BYBIT: "TRXUSDT", OKX: "TRX-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+DOTUSDT:
+  venues: { BINANCE: "DOTUSDT", BYBIT: "DOTUSDT", OKX: "DOT-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+NEARUSDT:
+  venues: { BINANCE: "NEARUSDT", BYBIT: "NEARUSDT", OKX: "NEAR-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+ATOMUSDT:
+  venues: { BINANCE: "ATOMUSDT", BYBIT: "ATOMUSDT", OKX: "ATOM-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+LTCUSDT:
+  venues: { BINANCE: "LTCUSDT", BYBIT: "LTCUSDT", OKX: "LTC-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+BCHUSDT:
+  venues: { BINANCE: "BCHUSDT", BYBIT: "BCHUSDT", OKX: "BCH-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+ARBUSDT:
+  venues: { BINANCE: "ARBUSDT", BYBIT: "ARBUSDT", OKX: "ARB-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+APTUSDT:
+  venues: { BINANCE: "APTUSDT", BYBIT: "APTUSDT", OKX: "APT-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+MATICUSDT:
+  venues: { BINANCE: "MATICUSDT", BYBIT: "MATICUSDT", OKX: "MATIC-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"
+SUIUSDT:
+  venues: { BINANCE: "SUIUSDT", BYBIT: "SUIUSDT", OKX: "SUI-USDT-SWAP" }
+  type: "perp"
+  quote: "USDT"

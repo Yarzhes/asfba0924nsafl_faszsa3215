@@ -61,7 +61,17 @@ class MetaGate:
                 # Expect dict with keys: model, feature_names, pre (optional)
                 if isinstance(self._model_cache, dict) and 'feature_names' in self._model_cache:
                     self._feature_names = list(self._model_cache['feature_names'])
-                logger.info(f"[MetaGate] Loaded model from {model_path} with {len(self._feature_names or [])} features")
+                # If model bundle didn't include feature_names, allow runtime configuration
+                if not self._feature_names:
+                    cfg_feats = cfg.get('input_features') or []
+                    if cfg_feats:
+                        try:
+                            self._feature_names = list(cfg_feats)
+                            logger.info(f"[MetaGate] No feature_names in bundle; using {len(self._feature_names)} features from settings.input_features")
+                        except Exception:
+                            self._feature_names = []
+                else:
+                    logger.info(f"[MetaGate] Loaded model from {model_path} with {len(self._feature_names or [])} features")
         except FileNotFoundError:
             logger.debug("Meta model path not found: {}", model_path)
         except Exception as e:  # pragma: no cover

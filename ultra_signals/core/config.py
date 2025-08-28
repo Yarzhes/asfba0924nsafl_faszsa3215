@@ -159,6 +159,28 @@ class DerivativesSettings(BaseModel):
     oi: OISettings
     liq_pulse: LiqPulseSettings
 
+
+class SentimentSourceWeights(BaseModel):
+    influencer: float = Field(3.0, ge=0)
+    twitter: float = Field(1.5, ge=0)
+    reddit: float = Field(1.0, ge=0)
+    telegram: float = Field(0.8, ge=0)
+    news: float = Field(0.7, ge=0)
+
+
+class SentimentSettings(BaseModel):
+    enabled: bool = True
+    cache_dir: Optional[str] = ".cache/sentiment"
+    symbols: List[str] = Field(default_factory=list)
+    sources: Dict[str, Any] = Field(default_factory=dict)
+    source_weights: SentimentSourceWeights = SentimentSourceWeights()
+    influencers: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    topic_taxonomy_path: Optional[str] = None  # override path for topic taxonomy file
+    funding_threshold: float = Field(0.0003, ge=0.0)
+    oi_threshold_pct: float = Field(0.02, ge=0.0)
+    extremes: Dict[str, Any] = Field(default_factory=dict)
+    telemetry: Dict[str, Any] = Field(default_factory=dict)
+
 class RegimeSettings(BaseModel):
     """Parameters for the market regime classification engine."""
     hysteresis_bars: int = Field(3, ge=0)
@@ -195,6 +217,11 @@ class RegimeSettings(BaseModel):
     smoothing: Dict[str, Any] = Field(default_factory=lambda: {
         "stickiness": 0.85,                 # probability mass retained on current regime
         "hazard_weight": 0.30
+    })
+    # Confidence bands for mapping max_prob -> policy flag
+    confidence_bands: Dict[str, float] = Field(default_factory=lambda: {
+        "high": 0.7,
+        "medium": 0.4
     })
     feature_weights: Dict[str, float] = Field(default_factory=lambda: {
         "price_vol": 0.30,
@@ -404,10 +431,110 @@ class LiveOrderErrorBurst(BaseModel):
     window_sec: int = 120
 
 class LiveCircuitBreakers(BaseModel):
+    """Legacy circuit breaker settings (maintained for backwards compatibility)."""
     daily_loss_limit_pct: float = 0.06
     max_consecutive_losses: int = 4
     order_error_burst: LiveOrderErrorBurst = LiveOrderErrorBurst()
     data_staleness_ms: int = 2500
+
+# Sprint 65 - Extreme Event Protection Settings
+class ShockDetectionSettings(BaseModel):
+    """Configuration for shock detection (Sprint 65)."""
+    enabled: bool = True
+    return_windows_sec: List[float] = Field(default_factory=lambda: [1.0, 2.0, 5.0])
+    warn_k_sigma: float = 4.0
+    derisk_k_sigma: float = 5.0
+    flatten_k_sigma: float = 6.0
+    halt_k_sigma: float = 8.0
+    
+    rv_horizon_sec: float = 10.0
+    rv_warn_z: float = 2.5
+    rv_derisk_z: float = 3.0
+    rv_flatten_z: float = 4.0
+    
+    spread_warn_z: float = 2.0
+    spread_derisk_z: float = 3.0
+    depth_warn_drop_pct: float = 0.5
+    depth_derisk_drop_pct: float = 0.7
+    
+    vpin_warn_pctl: float = 0.90
+    vpin_derisk_pctl: float = 0.95
+    vpin_flatten_pctl: float = 0.98
+    lambda_warn_z: float = 2.0
+    lambda_derisk_z: float = 3.0
+    
+    oi_dump_warn_pct: float = 0.10
+    oi_dump_derisk_pct: float = 0.20
+    funding_swing_warn_bps: float = 10.0
+    funding_swing_derisk_bps: float = 25.0
+    
+    venue_health_warn: float = 0.8
+    venue_health_derisk: float = 0.6
+    stablecoin_depeg_warn_bps: float = 20.0
+    stablecoin_depeg_derisk_bps: float = 50.0
+    
+    min_triggers_warn: int = 1
+    min_triggers_derisk: int = 2
+    min_triggers_flatten: int = 2
+    min_triggers_halt: int = 3
+
+class CircuitBreakerPolicySettings(BaseModel):
+    """Configuration for circuit breaker policy (Sprint 65)."""
+    enabled: bool = True
+    warn_threshold: float = 1.0
+    derisk_threshold: float = 2.0
+    flatten_threshold: float = 3.0
+    halt_threshold: float = 4.0
+    
+    warn_exit_threshold: float = 0.5
+    derisk_exit_threshold: float = 1.0
+    flatten_exit_threshold: float = 1.5
+    halt_exit_threshold: float = 2.0
+    
+    warn_cooldown_bars: int = 3
+    derisk_cooldown_bars: int = 5
+    flatten_cooldown_bars: int = 10
+    halt_cooldown_bars: int = 20
+    
+    enable_staged_recovery: bool = True
+    recovery_stages: List[float] = Field(default_factory=lambda: [0.25, 0.5, 0.75, 1.0])
+    recovery_stage_bars: int = 5
+    
+    # Action overrides per level
+    warn_size_mult: float = 0.5
+    warn_leverage_cap: Optional[float] = 5.0
+    derisk_size_mult: float = 0.0
+    derisk_leverage_cap: Optional[float] = 3.0
+    flatten_size_mult: float = 0.0
+    flatten_leverage_cap: Optional[float] = 1.0
+    halt_size_mult: float = 0.0
+
+class ExtremeEventAlertsSettings(BaseModel):
+    """Configuration for extreme event Telegram alerts (Sprint 65)."""
+    enabled: bool = True
+    rate_limit_sec: int = 30
+    max_triggers_shown: int = 3
+    include_countdown: bool = True
+    include_technical_details: bool = True
+
+class SafeExitSettings(BaseModel):
+    """Configuration for safe position exits (Sprint 65)."""
+    max_participation_rate: float = 0.1
+    slice_duration_sec: int = 30
+    max_slices: int = 10
+    passive_timeout_sec: int = 120
+    market_urgency_threshold: float = 5.0
+    allow_cross_spread: bool = False
+    min_order_value_usd: float = 10.0
+    venue_health_threshold: float = 0.7
+
+class ExtremeEventProtectionSettings(BaseModel):
+    """Sprint 65 - Comprehensive extreme event protection settings."""
+    enabled: bool = True
+    shock_detection: ShockDetectionSettings = ShockDetectionSettings()
+    circuit_policy: CircuitBreakerPolicySettings = CircuitBreakerPolicySettings()
+    alerts: ExtremeEventAlertsSettings = ExtremeEventAlertsSettings()
+    safe_exit: SafeExitSettings = SafeExitSettings()
 
 class LiveSettings(BaseModel):
     enabled: bool = False
@@ -719,6 +846,8 @@ class Settings(BaseModel):
     live: Optional[LiveSettings] = None
     backtest: Optional[BacktestSettings] = None
     walkforward: Optional[WalkforwardSettings] = None
+    # Sprint 65 - Extreme Event Protection
+    extreme_event_protection: Optional[ExtremeEventProtectionSettings] = None
     calibration: Optional[CalibrationSettings] = None
     reports: Optional[ReportsSettings] = None
     logging: Optional[LoggingSettings] = None

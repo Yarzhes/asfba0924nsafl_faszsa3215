@@ -16,7 +16,7 @@ Design Principles:
   consumers of the data (feature calculation functions).
 """
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Dict, Optional, List, Any, Tuple
 
 import math
@@ -58,8 +58,11 @@ from ultra_signals.core.custom_types import FlowMetricsFeatures
 from ultra_signals.features.whales import compute_whale_features
 from ultra_signals.core.custom_types import WhaleFeatures
 from ultra_signals.core.custom_types import MacroFeatures
-from ultra_signals.patterns import PatternEngine
+from ultra_signals.patterns import PatternEngine, extract_pattern_features  # type: ignore
 from ultra_signals.core.custom_types import PatternInstance
+from ultra_signals.market.kyle_online import TimeWindowAggregator, EWKyleEstimator
+from ultra_signals.market.impact_adapter import ImpactAdapter
+from ultra_signals.market.tick_helpers import tick_rule_sign
 
 # Lazy import macro engine if configured
 try:  # pragma: no cover - optional dependency path
@@ -134,6 +137,13 @@ class FeatureStore:
         #   options: { 'snapshot': { ... anomaly stats ... } }
         #   smart_money: { 'records': [ {ts,symbol,side,usd,wallet?} ... ], 'hit_rate_30d': float }
         self._whale_state: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        # Impact estimator state: per-symbol aggregator + EW estimator
+        # Structure: _impact_state[symbol] = { 'aggregator': TimeWindowAggregator, 'estimator': EWKyleEstimator }
+        self._impact_state: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        # Impact rolling history for robust z-scores (spreads & depths)
+        hist_window = int(_safe_settings(self._settings, ('features', 'impact', 'history_window'), 200) or 200)
+        self._impact_history = defaultdict(lambda: {'spreads': deque(maxlen=hist_window), 'depths': deque(maxlen=hist_window)})
+
         # Sprint 42 macro export buffering
         self._macro_export_buffer: List[Dict[str, Any]] = []
         self._macro_export_last_flush: float = time.time()
@@ -147,8 +157,12 @@ class FeatureStore:
                 self._start_macro_export_thread()
         except Exception:  # pragma: no cover
             pass
+
         # Sprint 44 pattern engine (lazy init done on first bar). Keep detectors lightweight.
         self._pattern_engine = None  # type: ignore
+        # simple cache for pattern feature extraction: key (symbol,tf,bar_type,window_id)
+        self._pattern_feature_cache = defaultdict(dict)
+    # ----- pluggable post-bar hooks (initialized in __init__) -----
 
     # -------------------------------------------------------------------------
     # Helpers: normalize timestamps and provide robust feature lookups
@@ -186,6 +200,64 @@ class FeatureStore:
         except Exception:
             pass
         return ts
+
+    # ----------------- ATR provider & hooks -----------------
+    def register_post_bar_hook(self, fn):
+        """Register a callable(fn(symbol, timeframe, bar_row, feature_store)) to run after each on_bar ingestion."""
+        try:
+            if callable(fn):
+                self._post_bar_hooks.append(fn)
+        except Exception:
+            pass
+
+    def compute_atr(self, symbol: str, timeframe: str, lookback: int = 14) -> Optional[float]:
+        """Compute ATR from cached OHLCV bars.
+
+        Default method: Wilder smoothing (Wilder ATR) which uses the
+        recursive formula ATR_t = (ATR_{t-1}*(n-1) + TR_t) / n with the
+        initial ATR set to the simple mean of the first `lookback` TRs.
+
+        Returns ATR in price units or None if insufficient data.
+        """
+        try:
+            # allow lookback override from settings if None passed
+            if lookback is None:
+                lookback = int(_safe_settings(self._settings, ('features', 'atr_lookback'), 14) or 14)
+
+            df = self._ohlcv_data.get(symbol, {}).get(timeframe)
+            if df is None or len(df) < 2:
+                return None
+
+            # Compute True Range series
+            tail = df[['high', 'low', 'close']].copy()
+            if tail.shape[0] < 2:
+                return None
+            prev_close = tail['close'].shift(1)
+            tr = (
+                (tail['high'] - tail['low']).abs()
+                .combine(abs(tail['high'] - prev_close), max)
+                .combine(abs(tail['low'] - prev_close), max)
+            )
+            tr = tr.dropna()
+            if len(tr) < lookback:
+                return None
+
+            # Use Wilder smoothing: initial ATR = mean of first `lookback` TRs
+            tr_vals = tr.values
+            # initial ATR from first lookback values
+            init_atr = float(tr_vals[:lookback].mean())
+            if len(tr_vals) == lookback:
+                return init_atr
+
+            # recursively apply Wilder formula for remaining TR values
+            atr = init_atr
+            n = float(lookback)
+            for v in tr_vals[lookback:]:
+                atr = (atr * (n - 1.0) + float(v)) / n
+
+            return float(atr)
+        except Exception:
+            return None
 
     # NOTE: Backward/forward-compatible API
     # - get_features(symbol, ts_like)                        -> search across all tfs (nearest<=)
@@ -547,6 +619,15 @@ class FeatureStore:
             "Computed features (store id={}) for {} {} at {}: {}",
             id(self), symbol, timeframe, timestamp, feature_dict
         )
+        # Run any registered post-bar hooks (e.g., DC FeatureView integration)
+        try:
+            for hook in list(self._post_bar_hooks):
+                try:
+                    hook(symbol, timeframe, bar, self)
+                except Exception:
+                    continue
+        except Exception:
+            pass
         # --- Sprint 10 Regime state (per-bar) ---
         try:
             if (self._settings.get("regime", {}) or {}).get("enabled", True):
@@ -666,6 +747,71 @@ class FeatureStore:
         except Exception:
             pass
 
+        # --- Impact estimator snapshot (per-symbol, added by Sprint 50) ---
+        try:
+            s = self._impact_state.get(symbol)
+            if s is not None and 'estimator' in s:
+                est = s['estimator']
+                last_mid = None
+                try:
+                    last_mid = float(self._latest_mark_price.get(symbol) or None)
+                except Exception:
+                    last_mid = None
+                snap = est.snapshot(last_mid=last_mid, ts=int(timestamp.value // 1_000_000))
+                # instantiate adapter lazily
+                if 'adapter' not in s:
+                    s['adapter'] = ImpactAdapter()
+                adapter: ImpactAdapter = s.get('adapter')
+                # try to derive spread_z and depth_z (best-effort)
+                spread_z = None
+                depth_z = None
+                try:
+                    # update rolling history for spread & depth
+                    spread_bps = self.get_spread_bps(symbol) or 0.0
+                    depth_ev = self.get_book_top(symbol)
+                    top_depth = float(depth_ev.get('B', 0.0) + depth_ev.get('A', 0.0)) if depth_ev is not None else 0.0
+
+                    # push into rolling history
+                    try:
+                        self._impact_history[symbol]['spreads'].append(float(spread_bps))
+                        self._impact_history[symbol]['depths'].append(float(top_depth))
+                    except Exception:
+                        pass
+
+                    # compute robust median/MAD z-scores if enough history
+                    def robust_z(hist):
+                        if not hist or len(hist) < 5:
+                            return None
+                        arr = list(hist)
+                        med = float(pd.Series(arr).median())
+                        mad = float(pd.Series([abs(x - med) for x in arr]).median()) or 1e-9
+                        return (arr[-1] - med) / (1.4826 * mad)
+
+                    spread_z = robust_z(self._impact_history[symbol]['spreads'])
+                    depth_z = robust_z(self._impact_history[symbol]['depths'])
+                except Exception:
+                    spread_z = None
+                    depth_z = None
+
+                hints = None
+                try:
+                    hints = adapter.decide(getattr(snap, 'lambda_z', None), spread_z, depth_z)
+                except Exception:
+                    hints = None
+
+                # expose as a simple dict under 'impact'
+                feature_dict['impact'] = {
+                    'lambda_est': getattr(snap, 'lambda_est', None),
+                    'r2': getattr(snap, 'r2', None),
+                    'samples': getattr(snap, 'samples', None),
+                    'lambda_bps_per_1k': getattr(snap, 'lambda_bps_per_1k', None),
+                    'lambda_z': getattr(snap, 'lambda_z', None),
+                    'impact_state': getattr(hints, 'impact_state', None) if hints is not None else None,
+                    'impact_hints': hints,
+                }
+        except Exception:
+            pass
+
     # ------------------- Latest market snapshots -------------------
 
     def _ingest_book_ticker(self, ticker: BookTickerEvent) -> None:
@@ -683,6 +829,44 @@ class FeatureStore:
 
     def _ingest_agg_trade(self, event: AggTradeEvent) -> None:
         self._recent_trades[event.symbol].append((event.timestamp, event.price, event.quantity, event.is_buyer_maker))
+        try:
+            # Feed impact aggregator: AggTradeEvent.timestamp is ms
+            sym = event.symbol
+            s = self._impact_state.setdefault(sym, {})
+            if 'aggregator' not in s:
+                s['aggregator'] = TimeWindowAggregator(window_s=5.0)
+            if 'estimator' not in s:
+                s['estimator'] = EWKyleEstimator(alpha=0.02)
+            # sign convention: is_buyer_maker True means maker side; keep sign consistent with project trades
+            signed = float(event.quantity) * (-1.0 if event.is_buyer_maker else 1.0)
+            # mid-price approximated by last known mark price or trade price
+            mid = float(self._latest_mark_price.get(sym) or event.price or 0.0)
+            s['aggregator'].add_tick(int(event.timestamp), float(mid), signed)
+            # Try to sample immediately and update estimator
+            dq, dp, last_mid = s['aggregator'].window_sample(int(event.timestamp))
+            if abs(dq) > 0 and last_mid is not None:
+                try:
+                    # If configured, use signed notional (price*qty*sign) as regressor instead of raw qty
+                    impact_cfg = ((self._settings or {}).get('features') or {}).get('impact', {}) or {}
+                    use_notional_cfg = bool(impact_cfg.get('use_notional', False))
+                    use_trade_price = bool(impact_cfg.get('use_trade_price', False))
+                    invert_notional_sign = bool(impact_cfg.get('invert_notional_sign', False))
+                    if use_notional_cfg:
+                        # Choose price: prefer mid/mark by default, allow opting into trade price
+                        trade_px = float(event.price or last_mid or 0.0)
+                        mark_px = float(self._latest_mark_price.get(sym) or event.price or last_mid or 0.0)
+                        chosen_px = trade_px if use_trade_price else mark_px
+                        sign = float(tick_rule_sign(event.is_buyer_maker))
+                        if invert_notional_sign:
+                            sign = -sign
+                        notional = chosen_px * float(event.quantity) * float(sign)
+                        s['estimator'].add_sample(dq, dp, use_notional=True, notional=notional)
+                    else:
+                        s['estimator'].add_sample(dq, dp)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # ------------------- Public getters -------------------
 
@@ -824,6 +1008,38 @@ class FeatureStore:
             })
         return out
 
+    # ----------------- Pattern feature extraction bridge ------------------
+    def get_pattern_features(self, symbol: str, timeframe: str, bar_type: str = "TIME", window_id: str = None, **params) -> Dict[str, float]:
+        """Return deterministic pattern-based features for a symbol/timeframe.
+
+        Caches by (symbol, timeframe, bar_type, window_id) to avoid recompute within same bar.
+        """
+        key = (symbol, timeframe, str(bar_type), str(window_id))
+        cached = self._pattern_feature_cache.get(symbol, {}).get(key)
+        if cached is not None:
+            return cached
+
+        df = self.get_ohlcv(symbol, timeframe)
+        if df is None or df.empty:
+            return {}
+        try:
+            # Convert df to Bars via PatternEngine helper (we have extract_pattern_features)
+            from ultra_signals.patterns.base import Bars as _Bars
+            bars = _Bars.from_dataframe(df)
+            bt = params.get('bar_type', bar_type)
+            # bar_type may be string of enum
+            from ultra_signals.patterns.base import BarType as _BarType
+            try:
+                bt_enum = _BarType[bt] if isinstance(bt, str) and bt in _BarType.__members__ else _BarType.TIME
+            except Exception:
+                bt_enum = _BarType.TIME
+            feat = extract_pattern_features(bars, bt_enum, (self._settings or {}).get('patterns', {}))
+            # cache
+            self._pattern_feature_cache.setdefault(symbol, {})[key] = feat
+            return feat
+        except Exception:
+            return {}
+
     # --- Book top in a dict form the depth/thinness check expects
     def get_book_top(self, symbol: str) -> Optional[Dict[str, float]]:
         """
@@ -911,6 +1127,47 @@ class FeatureStore:
                 df.to_csv(path, mode='a' if exists else 'w', header=not exists, index=False)
         except Exception:
             pass
+
+    # ---------------- Funding / OI persistence helpers ----------------
+    def _buffer_funding_row(self, row: Dict[str, object]):
+        """Buffer a funding / oi row for async export. Row is a dict with keys like
+        'symbol','ts','funding_rate','oi_notional','venue'"""
+        try:
+            self._macro_export_buffer.append(row)
+        except Exception:
+            pass
+
+    def export_funding_rows(self, path: str = 'funding_export.csv') -> None:
+        """Flush buffered funding rows to CSV (simple synchronous flush)."""
+        try:
+            import pandas as pd
+            with self._macro_export_lock:
+                if not self._macro_export_buffer:
+                    return
+                df = pd.DataFrame(self._macro_export_buffer)
+                exists = False
+                try:
+                    import os
+                    exists = os.path.isfile(path)
+                except Exception:
+                    exists = False
+                df.to_csv(path, mode='a' if exists else 'w', header=not exists, index=False)
+                self._macro_export_buffer = []
+        except Exception:
+            pass
+
+    def get_basis_bps(self, symbol: str) -> Optional[float]:
+        """Simple accessor stub for perp-spot basis; if available in latest features return it."""
+        try:
+            feats = self.get_latest_features(symbol, None)
+            if not feats:
+                return None
+            deriv = feats.get('derivatives')
+            if deriv and getattr(deriv, 'basis_bps', None) is not None:
+                return float(getattr(deriv, 'basis_bps'))
+        except Exception:
+            pass
+        return None
 
     # --- Spread in basis points (bps) convenience
     def get_spread_bps(self, symbol: str) -> Optional[float]:
@@ -1018,6 +1275,17 @@ class FeatureStore:
         if feats and "regime" in feats:
             return feats["regime"]
         return None
+
+    # ---------------- Impact provider helper (Sprint 50) -----------------
+    def get_lambda_for(self, symbol: str) -> Optional[float]:
+        """Return latest lambda estimate for a symbol if available (units: price change per unit signed volume)."""
+        try:
+            s = self._impact_state.get(symbol)
+            if not s or 'estimator' not in s:
+                return None
+            return float(s['estimator'].lambda_est)
+        except Exception:
+            return None
 
     # Sprint 10 helper: structured regime query (at or before timestamp)
     def get_regime(self, symbol: str, timeframe: str, ts_like: Any = None):  # type: ignore[override]

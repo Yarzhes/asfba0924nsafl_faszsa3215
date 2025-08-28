@@ -1,0 +1,22 @@
+experiment_name: ab_lvar_sizing
+description: A/B backtest comparing baseline sizing vs L-VaR adjusted sizing
+common:
+  symbol: BTCUSDT
+  timeframe: 5m
+  start: 2024-01-01
+  end: 2024-06-01
+  capital: 100000
+  slippage_model: book_proxy
+  adv_source: computed
+
+variants:
+  - name: baseline
+    risk:
+      lvar_enabled: false
+    notes: baseline sizing
+  - name: lvar_sizing
+    risk:
+      lvar_enabled: true
+      liq_cost_max_pct_equity: 0.01
+      lvar_max_pct_equity: 0.02
+    notes: L-VaR adjusts size and may veto

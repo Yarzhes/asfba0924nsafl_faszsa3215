@@ -93,6 +93,33 @@ def _window_params_hash(cfg_key: str) -> int:  # compatibility helper
     return 1
 
 
+class PolicyAdapter:
+    """Simple adapter that maps a realtime toxicity score (0..1) to a GateDecision.
+
+    Config options accepted in dict:
+      - veto_th: float (>=) threshold to VETO
+      - dampen_th: float (>=) threshold to DAMPEN
+      - dampen_size: float size_mult for DAMPEN
+      - category: optional string
+    """
+    def __init__(self, cfg: dict | None = None):
+        cfg = cfg or {}
+        self.veto_th = float(cfg.get('veto_th', 0.9))
+        self.dampen_th = float(cfg.get('dampen_th', 0.7))
+        self.dampen_size = float(cfg.get('dampen_size', 0.5))
+        self.category = cfg.get('category')
+
+    def decide(self, tox_score: float, symbol: str | None = None, now_ms: int | None = None) -> GateDecision | None:
+        try:
+            if tox_score >= self.veto_th:
+                return GateDecision(action='VETO', reason=f'VPIN_TOX:{tox_score:.3f}', category=self.category)
+            if tox_score >= self.dampen_th:
+                return GateDecision(action='DAMPEN', reason=f'VPIN_TOX:{tox_score:.3f}', size_mult=self.dampen_size, category=self.category)
+        except Exception:
+            return None
+        return None
+
+
 def evaluate(symbol: str, now_ms: int, venue: str | None, profile: dict | None, settings: dict) -> GateDecision:
     cfg = (settings.get('event_risk') or {}) if isinstance(settings, dict) else {}
     if not cfg.get('enabled', False):
@@ -125,6 +152,45 @@ def evaluate(symbol: str, now_ms: int, venue: str | None, profile: dict | None, 
             med = (cfg.get('actions') or {}).get('MED', {})
             return GateDecision(action='DAMPEN', reason='MISSING_FEED_SAFE', size_mult=float(med.get('size_mult', 0.5)))
         return GateDecision(action='NONE')
+
+    # PolicyAdapter: allow realtime feature-driven overrides (e.g., tox_score)
+    try:
+        # profile may contain fused microstructure features produced by feature store
+        tox = None
+        if isinstance(profile, dict):
+            # common keys: 'tox_score', 'vpin_tox', 'vpin' etc.
+            tox = profile.get('tox_score') or profile.get('vpin_tox') or profile.get('tox')
+        # also allow a settings-provided lookup path for features e.g., settings['features_path']
+        if tox is None:
+            feats_path = cfg.get('realtime_feature_path')
+            if feats_path and isinstance(settings, dict):
+                # simple dotted path lookup
+                parts = feats_path.split('.')
+                node = settings
+                for p in parts:
+                    if isinstance(node, dict):
+                        node = node.get(p)
+                    else:
+                        node = None; break
+                tox = node
+        if tox is not None:
+            # ensure numeric
+            try:
+                t = float(tox)
+            except Exception:
+                t = None
+            if t is not None:
+                # Map tox_score (0..1) to GateDecision using thresholds in cfg
+                pa = PolicyAdapter(cfg.get('policy_adapter', {}))
+                dec = pa.decide(t, symbol=symbol, now_ms=now_ms)
+                if dec:
+                    _STATS['evaluations'] += 1
+                    if dec.action == 'VETO':
+                        _STATS['vetoes'] += 1
+                    return dec
+    except Exception:
+        # Swallow adapter errors and continue to DB-driven logic
+        pass
 
     act_cfg = cfg.get('actions', {})
     sym_over = (cfg.get('symbol_overrides') or {}).get(symbol, {})

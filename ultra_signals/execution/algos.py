@@ -47,6 +47,15 @@ def plan_child_orders(symbol: str, side: str, total_notional: float, price: floa
                 plan.meta = (plan.meta or {})
                 plan.meta.update({'child_ix':i,'algo':'TWAP','slices':slices})
                 plans.append(plan)
+    # Optionally support VWAP-style child planning if configured
+    vcfg = algos.get('vwap', {})
+    if vcfg.get('enabled') and total_notional >= float(vcfg.get('min_notional', threshold)):
+        # create a single plan that indicates VWAP-style execution
+        plan = build_exec_plan(symbol, side, book, tick_size=tick_size, atr=atr, atr_pct=atr_pct, regime=regime, settings=settings, now_ms=now_ms)
+        if plan:
+            plan.meta = (plan.meta or {})
+            plan.meta.update({'algo': 'VWAP', 'vwap_cfg': vcfg, 'child_notional': total_notional})
+            plans.append(plan)
     return plans
 
 __all__ = ['plan_child_orders']

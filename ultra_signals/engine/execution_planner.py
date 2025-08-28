@@ -8,6 +8,16 @@ from .playbooks import (
     make_mr_bollinger_fade, make_mr_vwap_revert, make_chop_flat
 )
 
+
+def _get_setting(s, key, default=None):
+    """Utility: read setting key from either dict or Pydantic model."""
+    if isinstance(s, dict):
+        return s.get(key, default)
+    try:
+        return getattr(s, key, default)
+    except Exception:
+        return default
+
 # Simple heuristic selectors ---------------------------------------------------
 
 def _ema_separation_atr(features: Dict[str, Any]) -> Optional[float]:
@@ -32,13 +42,28 @@ def _expected_rr(stop_mult: float, first_tp_mult: float) -> Optional[float]:
 
 
 def select_playbook(regime_obj, features: Dict[str, Any], decision, settings: Dict) -> Optional[Playbook]:
-    pb_cfg = (settings.get('playbooks') or {})
+    # support both dict-style settings and Pydantic models
+    def _get_setting(s, key, default=None):
+        if isinstance(s, dict):
+            return s.get(key, default)
+        try:
+            return getattr(s, key, default)
+        except Exception:
+            return default
+
+    pb_cfg = (_get_setting(settings, 'playbooks') or {})
+    # Prefer smoothed regime profile when available; fall back to profile attr
     regime_name = 'trend'
     try:
         if regime_obj is not None:
-            regime_name = getattr(regime_obj, 'profile', None) or getattr(regime_obj, 'mode', None) or 'trend'
-            if hasattr(regime_name, 'value'):
-                regime_name = regime_name.value
+            # if smoothed probs exist, pick argmax
+            sm = getattr(regime_obj, 'smoothed_regime_probs', None)
+            if isinstance(sm, dict) and sm:
+                regime_name = max(sm.items(), key=lambda kv: kv[1])[0]
+            else:
+                regime_name = getattr(regime_obj, 'profile', None) or getattr(regime_obj, 'mode', None) or 'trend'
+                if hasattr(regime_name, 'value'):
+                    regime_name = regime_name.value
     except Exception:
         pass
 
@@ -117,6 +142,16 @@ def build_plan(playbook: Playbook, features: Dict[str, Any], decision, settings:
     volatility = features.get('volatility')
     momentum = features.get('momentum')
     regime_obj = features.get('regime')
+    # expose playbook hint and confidence flag into plan metadata if present
+    try:
+        if regime_obj is not None:
+            hint = getattr(regime_obj, 'playbook_hint', None)
+            cf = getattr(regime_obj, 'regime_confidence_flag', None)
+            if hint:
+                # annotate plan with suggested playbook id for telemetry
+                pass
+    except Exception:
+        pass
     of_detail = (decision.vote_detail or {}).get('orderflow') if decision.vote_detail else {}
 
     # ADX gate
@@ -180,7 +215,22 @@ def build_plan(playbook: Playbook, features: Dict[str, Any], decision, settings:
         'stop_price': stop_price,
         'tp_bands': tp_bands,
         'atr_used': atr,
+    'playbook_hint': getattr(regime_obj, 'playbook_hint', None) if regime_obj is not None else None,
+    'regime_confidence_flag': getattr(regime_obj, 'regime_confidence_flag', None) if regime_obj is not None else None,
     }
+
+    # If execution settings prefer VWAP or the playbook suggests VWAP, annotate plan
+    try:
+        exec_cfg = _get_setting(settings, 'execution') or {}
+        default_algo = exec_cfg.get('default_child_algo')
+        if default_algo and str(default_algo).upper() == 'VWAP':
+            plan['child_algo'] = 'VWAP'
+            plan['vwap_cfg'] = exec_cfg.get('vwap', {})
+        elif 'vwap' in (playbook.name or '').lower():
+            plan['child_algo'] = 'VWAP'
+            plan['vwap_cfg'] = (exec_cfg.get('vwap') or {})
+    except Exception:
+        pass
 
     # Enriched debug line (align closer to spec wording)
     adx_val = getattr(trend, 'adx', None) if trend else None

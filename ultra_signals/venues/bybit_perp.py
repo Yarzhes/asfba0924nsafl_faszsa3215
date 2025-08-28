@@ -1,4 +1,8 @@
-"""Bybit linear perpetual adapter (stub)."""
+"""Bybit linear perpetual adapter (stub).
+
+Rewritten to resolve indentation issues; introduces a deterministic mid offset
+to facilitate synthetic cross-venue spread scenarios in tests.
+"""
 from __future__ import annotations
 import time
 import random
@@ -23,8 +27,8 @@ class BybitPerpPaper(ExchangeVenue):
         return []
 
     async def get_orderbook_top(self, symbol: str) -> BookTop:
-        px = 50000.0 if symbol.startswith("BTC") else 2500.0
-        # wider spread to allow deterministic preference in tests
+        base = 50000.0 if symbol.startswith("BTC") else 2500.0
+        px = base + 2.0  # upward offset
         bid = px - 1.5
         ask = px + 1.5
         return BookTop(bid=bid, bid_size=4, ask=ask, ask_size=4, ts=int(time.time()*1000))

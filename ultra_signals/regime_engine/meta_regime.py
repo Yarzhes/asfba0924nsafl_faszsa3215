@@ -249,6 +249,7 @@ class RegimeModelBundle:
         probs = {r: 1.0/len(self.regimes) for r in self.regimes}
         regime_label = None
         hazard = 0.0
+        pre_smoothed = None
         # Cluster assignment (nearest centroid)
         if self.cluster_labels:
             try:
@@ -274,6 +275,11 @@ class RegimeModelBundle:
             sup_prob = self.supervised.predict(X)
             if sup_prob is not None and regime_label:
                 probs[regime_label] = min(1.0, max(0.0, 0.5*probs[regime_label] + 0.5*sup_prob))
+        # Capture pre-smoothed copy for diagnostics
+        try:
+            pre_smoothed = probs.copy()
+        except Exception:
+            pre_smoothed = None
         # Sticky smoothing
         stick = float((self.settings.smoothing or {}).get('stickiness', 0.85))
         if self.sticky_probs and regime_label:
@@ -283,6 +289,23 @@ class RegimeModelBundle:
                 raw = probs.get(r, 0.0)
                 smoothed[r] = stick*prev + (1-stick)*raw
             probs = smoothed
+        # Moving-average smoothing over last N bars if configured
+        ma_window = int((self.settings.smoothing or {}).get('ma_window_bars', 1))
+        if ma_window and ma_window > 1:
+            # maintain a tiny history buffer on the bundle
+            hist = getattr(self, '_prob_hist', [])
+            hist.append(probs.copy())
+            if len(hist) > ma_window:
+                hist.pop(0)
+            self._prob_hist = hist
+            # average across history
+            avg = {r: 0.0 for r in self.regimes}
+            for row in hist:
+                for r,v in row.items():
+                    avg[r] += float(v)
+            denom = max(1, len(hist))
+            probs = {r: avg[r]/denom for r in avg}
+        smoothed_probs = probs.copy()
         self.sticky_probs = probs.copy()
         # Normalize
         s = sum(probs.values())
@@ -299,6 +322,15 @@ class RegimeModelBundle:
             entropy = -sum(p*math.log(p+1e-9) for p in probs.values())
             max_e = math.log(len(probs)) if probs else 1.0
             hazard = entropy / max_e if max_e>0 else 0.0
+        # Compute entropy & max_prob for diagnostics
+        try:
+            entropy = -sum(p*math.log(p+1e-9) for p in probs.values())
+            max_e = math.log(len(probs)) if probs else 1.0
+            norm_entropy = entropy / max_e if max_e>0 else 0.0
+            max_prob = max(probs.values()) if probs else 0.0
+        except Exception:
+            norm_entropy = 1.0
+            max_prob = 0.0
         # Change-point (confidence deltas)
         delta_conf = (base.confidence or 0.0) - (getattr(self, '_prev_conf', 0.0))
         self._prev_conf = base.confidence or 0.0
@@ -323,10 +355,44 @@ class RegimeModelBundle:
             size_mult *= 0.5
         rf = base.model_copy(deep=True)
         rf.regime_probs = probs
+        rf.pre_smoothed_regime_probs = pre_smoothed
+        rf.smoothed_regime_probs = smoothed_probs
         rf.regime_label = regime_label
         rf.transition_hazard = round(hazard,4)
+        rf.regime_trans_prob = round(hazard,4)
         rf.exp_vol_h = exp_vol
         rf.dir_bias = dir_bias
+        rf.regime_entropy = round(norm_entropy,4)
+        rf.regime_max_prob = round(max_prob,4)
+        # Confidence flag from config bands
+        bands = getattr(self.settings, 'confidence_bands', {'high':0.7,'medium':0.4})
+        if max_prob >= float(bands.get('high',0.7)):
+            cf = 'high'
+        elif max_prob >= float(bands.get('medium',0.4)):
+            cf = 'medium'
+        else:
+            cf = 'low'
+        rf.regime_confidence_flag = cf
+        # Suggest a playbook hint based on regime_label and confidence
+        try:
+            if regime_label:
+                hint = f"{regime_label}"
+                # low confidence -> conservative suffix
+                if cf == 'low':
+                    hint = f"{hint}-conservative"
+                rf.playbook_hint = hint
+        except Exception:
+            rf.playbook_hint = None
+        # adjusted confidence blending vol forecast
+        try:
+            vol_adj = 1.0
+            if exp_vol is not None:
+                # higher expected vol reduces confidence
+                vol_adj = max(0.2, 1.0 - 0.5 * float(exp_vol))
+            rf.regime_confidence_adj = round(max_prob * vol_adj,4)
+        except Exception:
+            # best-effort, do not fail inference on failure here
+            rf.regime_confidence_adj = None
         # Inject context (macro / whale)
         if fv.macro and fv.macro.macro_risk_regime:
             rf.macro_risk_context = fv.macro.macro_risk_regime

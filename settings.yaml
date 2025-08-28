@@ -1,9 +1,12 @@
 # Ultra-Signals Settings - v0.1
 
 data_sources:
+  # API credentials MUST be provided via environment variables or a local .env (see .env.example).
+  # Do NOT commit secrets into settings.yaml. The loader (`ultra_signals.core.config`) prefers
+  # env overrides. Example env keys: BINANCE_USDM_API_KEY, BINANCE_USDM_API_SECRET
   binance_usdm:
-    api_key: "qWV8egLZudf3GNzt2LygfMfgqr6Hw2gWbXE9RjwP6VVhF9Sif9qVY1vot9cr1RsV"
-    api_secret: "2LjccLY6enls0g5hE1MqeC9jMmrSArhezIfm6X4ZcyUhS2xUSisxELZreSwebPjm"
+    api_key: null
+    api_secret: null
 
 # Sprint 39 Data Quality & Time Sync
 data_quality:
@@ -48,10 +51,17 @@ data_quality:
     map_path: "config/symbol_map.yaml"
 
 runtime:
-  symbols: ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
-  timeframes: ["1m", "5m"]
+  # Day-trading sniper defaults: prioritize short intraday TFs and MTF confirmations.
+  symbols: ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","LINKUSDT","TONUSDT","TRXUSDT","DOTUSDT","NEARUSDT","ATOMUSDT","LTCUSDT","BCHUSDT","ARBUSDT","APTUSDT","MATICUSDT","SUIUSDT"]
+  timeframes: ["1m", "3m", "5m", "15m"]
   primary_timeframe: "5m"
   reconnect_backoff_ms: 2000
+  sniper_mode:
+    enabled: true
+    mtf_confirm: true    # require multi-timeframe confirm (see Sprint 30)
+    min_confidence: 0.60
+    max_signals_per_hour: 6
+    daily_signal_cap: 30
 
 features:
   warmup_periods: 200
@@ -527,8 +537,9 @@ funding_rate_provider:
 transport:
   telegram:
     enabled: true
-    bot_token: null
-    chat_id: null
+    bot_token: null   # set via env: TELEGRAM_BOT_TOKEN
+    chat_id: null     # set via env: TELEGRAM_CHAT_ID
+    message_template: "{pair} | {side} | ENTRY:{entry} | SL:{sl} | TP:{tp} | Lev:{lev} | p:{p_win:.2f} | regime:{regime} | veto:{veto_flags} | code:{reason}"
   dry_run: true
 
 backtest:
@@ -555,38 +566,38 @@ logging:
 
 # Batch run configuration (multi-symbol / multi-timeframe backtests)
 batch_run:
+  # Use the 20 USDT-perp pairs for focused day-trading batch runs by default
   symbols:
     - BTCUSDT
     - ETHUSDT
     - SOLUSDT
     - BNBUSDT
     - XRPUSDT
-    - ADAUSDT
     - DOGEUSDT
-    - TRXUSDT
+    - ADAUSDT
     - AVAXUSDT
     - LINKUSDT
+    - TONUSDT
+    - TRXUSDT
     - DOTUSDT
-    - MATICUSDT
-    - LTCUSDT
-    - BCHUSDT
-    - SHIBUSDT
     - NEARUSDT
     - ATOMUSDT
-    - XLMUSDT
-    - APTUSDT
+    - LTCUSDT
+    - BCHUSDT
     - ARBUSDT
-    - OPUSDT
-    - FILUSDT
+    - APTUSDT
+    - MATICUSDT
     - SUIUSDT
-    - INJUSDT
-    - AAVEUSDT
-    - UNIUSDT
-    - RUNEUSDT
-    - ETCUSDT
-    - TIAUSDT
-    - TONUSDT
-  timeframes: ["5m", "15m", "1h"]
+  timeframes: ["1m","3m","5m","15m"]
+  start_date: "2024-10-01"
+  end_date: "2025-08-01"
+  max_parallel_workers: 6
+  reuse_cache: true
+  walk_forward:
+    enabled: false
+    train: "3m"
+    test: "3w"
+    advance: "3w"
   start_date: "2023-10-01"
   end_date: "2024-12-31"
   max_parallel_workers: 6

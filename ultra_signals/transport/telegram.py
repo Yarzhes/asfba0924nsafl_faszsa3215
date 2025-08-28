@@ -149,6 +149,23 @@ def format_message(decision: EnsembleDecision, settings: Dict) -> str:
             f"| Wgt Sum: `{weighted_sum:.3f}`\n"
         )
 
+        # Compact pre-trade summary line (if set by live runner)
+        try:
+            pre = vd.get('pre_trade') if isinstance(vd, dict) else None
+            if pre and isinstance(pre, dict):
+                pwin = pre.get('p_win')
+                regime = pre.get('regime') or 'n/a'
+                veto_ct = pre.get('veto_count', 0)
+                lat = pre.get('lat_ms') or {}
+                p50 = lat.get('p50') if isinstance(lat, dict) else None
+                p90 = lat.get('p90') if isinstance(lat, dict) else None
+                if pwin is not None:
+                    msg += f"PRE: p={pwin:.2f} | reg={regime} | veto={veto_ct} | lat_p50={p50:.1f}ms p90={p90:.1f}ms\n"
+                else:
+                    msg += f"PRE: reg={regime} | veto={veto_ct}\n"
+        except Exception:
+            pass
+
         # If the ensemble abstained (FLAT), include abstain reason if present
         reason = vd.get("reason")
         if decision.decision == "FLAT" and reason:

@@ -60,13 +60,39 @@ class Signal:
 class DerivativesFeatures(BaseModel):
     """Features derived from derivatives market data like funding, OI, and liquidations."""
 
+    # Funding
     funding_now: Optional[float] = None
     funding_trail: List[float] = []
+    funding_pred_next: Optional[float] = None
+    mins_to_funding: Optional[int] = None
+    funding_z: Optional[float] = None
+    funding_pctl: Optional[float] = None
+
+    # Open Interest (OI) dynamics
+    oi_notional: Optional[float] = None
+    oi_prev_notional: Optional[float] = None
+    oi_change_pct: Optional[float] = None
+    oi_z: Optional[float] = None
+    oi_rate_per_min: Optional[float] = None
+
+    # Taxonomy & liquidations
     oi_delta_1m: Optional[float] = None
     oi_delta_5m: Optional[float] = None
     oi_delta_15m: Optional[float] = None
+    oi_taxonomy: Optional[str] = None  # new_longs,new_shorts,short_cover,long_liq
     liq_pulse: int = 0
     liq_notional_5m: Optional[float] = None
+
+    # Perp-spot basis (optional)
+    basis_bps: Optional[float] = None
+    basis_z: Optional[float] = None
+
+    # Composite posture & policy outputs
+    deriv_posture_score: Optional[float] = None  # 0..1 composite
+    deriv_overheat_flag_long: Optional[int] = None
+    deriv_overheat_flag_short: Optional[int] = None
+    venue_disagreement_flag: Optional[int] = None
+    policy_suggest: Optional[str] = None  # allow,reduce,veto,delay_to_post_settlement
 
 
 class VolatilityBucket(str, Enum):
@@ -125,6 +151,14 @@ class RegimeFeatures(BaseModel):
     # Sprint 43 advanced meta-regime probabilistic outputs
     regime_label: Optional[str] = None                 # canonical label (trend_up, chop_lowvol, panic_deleverage ...)
     regime_probs: Optional[Dict[str, float]] = None     # soft distribution over configured regimes
+    pre_smoothed_regime_probs: Optional[Dict[str, float]] = None  # raw probs before moving-average smoothing
+    smoothed_regime_probs: Optional[Dict[str, float]] = None     # moving-average / MA-smoothed probs for stability
+    regime_entropy: Optional[float] = None                 # normalized entropy 0..1
+    regime_max_prob: Optional[float] = None                # highest probability in the vector
+    regime_confidence_flag: Optional[str] = None           # one of {high, medium, low}
+    regime_trans_prob: Optional[float] = None              # probability of transition next bar (hazard)
+    playbook_hint: Optional[str] = None                    # suggested playbook/template id
+    regime_confidence_adj: Optional[float] = None         # confidence after blending with vol forecast
     transition_hazard: Optional[float] = None           # flip risk proxy (0..1)
     exp_vol_h: Optional[float] = None                   # expected realized vol horizon h
     dir_bias: Optional[float] = None                    # directional drift (-1 .. +1)

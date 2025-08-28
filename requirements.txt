@@ -26,3 +26,7 @@ rich==13.7.1
 snscrape
 pytrends
 hmmlearn  # optional for HMM regime persistence (Sprint 43)
+arch
+
+# Optional heavy ML dependencies (install when you want to run xgboost/lightgbm tests):
+# pip install -r requirements-optional.txt

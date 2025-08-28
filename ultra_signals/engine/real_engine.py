@@ -10,6 +10,11 @@ from ultra_signals.engine import ensemble, regime, scoring
 from ultra_signals.risk.position_sizing import PositionSizing
 from ultra_signals.engine.regime_router import RegimeRouter
 from ultra_signals.engine.orderflow import OrderFlowAnalyzer, OrderFlowSnapshot, apply_orderflow_modulation
+try:
+    # optional lightweight orderflow engine (new S51 module)
+    from ultra_signals.orderflow.engine import OrderflowEngine
+except Exception:
+    OrderflowEngine = None
 from ultra_signals.engine.liquidation_heatmap import LiquidationHeatmap
 from ultra_signals.engine.position_sizer import PositionSizer
 from ultra_signals.engine.sizing.advanced_sizer import AdvancedSizer
@@ -187,6 +192,50 @@ class RealSignalEngine:
         self._external_open_positions = []  # list[dict]
         # Sprint 33: timeseries metrics accumulation for reporting
         self._pr_metrics_ts = []  # list[dict]
+        # Sprint 46: Economic Event Service injection (lazy; user may disable)
+        try:
+            econ_cfg = (self.settings.get('econ') or {}) if isinstance(self.settings, dict) else {}
+            if econ_cfg.get('enabled', False):
+                from ultra_signals.econ.service import EconEventService, static_config_collector_factory
+                self._econ_service = EconEventService(econ_cfg)
+                # Optional static events defined in config for tests / offline
+                static_events = econ_cfg.get('static_events') or []
+                if static_events:
+                    self._econ_service.register_collector('static', static_config_collector_factory(static_events))
+            else:
+                self._econ_service = None
+        except Exception as e:  # pragma: no cover
+            logger.debug('Econ service init failed: {}', e)
+            self._econ_service = None
+        # Orderflow engine (S51) - optional lightweight in-process engine for micro features
+        try:
+            if OrderflowEngine is not None:
+                self._of_engine = OrderflowEngine((self.settings.get('orderflow') or {}) if isinstance(self.settings, dict) else {})
+            else:
+                self._of_engine = None
+        except Exception:
+            self._of_engine = None
+        # Drift policy engine (optional): lazy init to avoid adding hard deps
+        try:
+            from ultra_signals.drift.policy import PolicyEngine
+            self._policy_engine = PolicyEngine((self.settings.get('drift_policy') or {}) if isinstance(self.settings, dict) else {})
+        except Exception:
+            self._policy_engine = None
+        # --- L-VaR, ExecAdapter, CircuitBreaker integration (Sprint 53) ---
+        try:
+            from ultra_signals.risk.lvar import LVarEngine
+            from ultra_signals.risk.exec_adapter import ExecAdapter
+            from ultra_signals.risk.circuit_breaker import CircuitBreaker
+            risk_cfg = (self.settings.get('risk') or {}) if isinstance(self.settings, dict) else {}
+            equity_override = float((self.settings.get('portfolio', {}) or {}).get('mock_equity', 10000.0))
+            self._lvar_engine = LVarEngine(equity=equity_override, pr_cap=float(risk_cfg.get('pr_cap', 0.12)))
+            self._exec_adapter = ExecAdapter(liq_cost_max_pct_equity=float(risk_cfg.get('liq_cost_max_pct_equity', 0.01)), lvar_max_pct_equity=float(risk_cfg.get('lvar_max_pct_equity', 0.02)))
+            self._circuit_breaker = CircuitBreaker(k_sigma=float(risk_cfg.get('flash_k_sigma', 6.0)), cooldown_bars=int(risk_cfg.get('cooldown_bars', 5)))
+        except Exception:
+            # keep engine resilient if risk modules missing
+            self._lvar_engine = None
+            self._exec_adapter = None
+            self._circuit_breaker = None
 
     # ----------------- Sprint 33 helpers (open positions + metrics) -----------------
     def set_open_positions(self, positions: list[dict]) -> None:
@@ -352,6 +401,15 @@ class RealSignalEngine:
             rs=None,
             flow_metrics=features.get("flow_metrics")
         )
+        # Sprint 46 econ feature attachment (built early so downstream gates can observe)
+        try:
+            if getattr(self, '_econ_service', None):
+                # Refresh service if cadence due, then build current features
+                self._econ_service.refresh(int(ts_epoch*1000))
+                econ_feats = self._econ_service.build_features(int(ts_epoch*1000))
+                feature_vector.econ = econ_feats
+        except Exception as e:  # pragma: no cover
+            logger.debug('Econ feature build error: {}', e)
         try:
             logger.debug("FV for {} at {}:\n{}", symbol, timestamp, feature_vector.model_dump_json(indent=2))
         except Exception:
@@ -373,6 +431,26 @@ class RealSignalEngine:
                 liqs = getattr(self.feature_store, "get_recent_liquidations", lambda *a, **k: [])(symbol, 200)
                 ob = getattr(self.feature_store, "get_orderbook_levels", lambda *a, **k: {})(symbol, 10)
                 prev_cvd = getattr(self.feature_store, "get_prev_cvd", lambda *a, **k: None)(symbol)
+                # If we have the in-process OrderflowEngine, feed recent trades/ob for richer metrics
+                try:
+                    if getattr(self, '_of_engine', None) is not None:
+                        now_ts = int(ts_epoch or int(time.time()))
+                        # ingest trades
+                        for t in trades:
+                            t_ts = int(t.get('ts') or t.get('timestamp') or now_ts)
+                            price = float(t.get('price') or t.get('px') or 0.0)
+                            qty = float(t.get('qty') or t.get('quantity') or 0.0)
+                            side = t.get('side')
+                            if side is None and 'is_buyer_maker' in t:
+                                side = 'sell' if t['is_buyer_maker'] else 'buy'
+                            self._of_engine.ingest_trade(t_ts, price, qty, side, aggressor=True)
+                        # ingest orderbook top levels if available
+                        if ob:
+                            bids = ob.get('bids') or []
+                            asks = ob.get('asks') or []
+                            self._of_engine.ingest_orderbook_snapshot(bids, asks)
+                except Exception:
+                    pass
                 of_snapshot = OrderFlowAnalyzer.build_snapshot(trades, liqs, ob, self.settings, prev_cvd)
             except Exception:
                 of_snapshot = None
@@ -459,6 +537,38 @@ class RealSignalEngine:
             )
             _trace_engine_flat(symbol, tf, ts_epoch, dec, "no_subsignals")
             return dec
+
+        # --- Sprint 53: Flash-crash Circuit Breaker check (early) ---
+        try:
+            if getattr(self, '_circuit_breaker', None) is not None:
+                # use last return and vol forecast if present
+                ret_pct = None
+                sigma = None
+                try:
+                    # compute last bar return
+                    prev_close = None
+                    df = self.feature_store.get_ohlcv(symbol, tf)
+                    if df is not None and len(df) >= 2:
+                        prev_close = float(df['close'].iloc[-2])
+                        last_close = float(df['close'].iloc[-1])
+                        if prev_close and last_close:
+                            ret_pct = (last_close - prev_close) / prev_close
+                except Exception:
+                    ret_pct = None
+                try:
+                    vol_obj = features.get('volatility') if isinstance(features, dict) else None
+                    sigma = float(getattr(vol_obj, 'sigma', None) or getattr(vol_obj, 'atr', None) or 0.0)
+                except Exception:
+                    sigma = None
+                cb_state = self._circuit_breaker.check_and_trigger(ret_pct if ret_pct is not None else 0.0, sigma if sigma is not None else 0.0, spread_z=(features.get('impact') or {}).get('impact_hints', None) and getattr((features.get('impact') or {}).get('impact_hints'), 'impact_state', None), vpin_toxic=False)
+                if cb_state and cb_state.triggered:
+                    final_decision.decision = 'FLAT'
+                    final_decision.vetoes.append('FLASH_CB')
+                    final_decision.vote_detail.setdefault('circuit_breaker', cb_state.__dict__)
+                    _trace_engine_flat(symbol, tf, ts_epoch, final_decision, 'flash_circuit_breaker')
+                    return final_decision
+        except Exception:
+            pass
 
         # 5) Regime router (Sprint 13) - determines profile & active alphas
         router_info = RegimeRouter.route({
@@ -737,6 +847,16 @@ class RealSignalEngine:
                         regime_profile = str(getattr(reg,'profile').value)
                 except Exception:
                     pass
+                # Attach orderflow micro score if available
+                try:
+                    if getattr(self, '_of_engine', None) is not None:
+                        m = self._of_engine.compute_micro_score()
+                        # expose scalar and components
+                        bundle['of_micro_score'] = float(m.get('of_micro_score') or 0.0)
+                        for ck, cv in (m.get('components') or {}).items():
+                            bundle[f'of_comp_{ck}'] = float(cv or 0.0)
+                except Exception:
+                    pass
                 t0 = perf_counter()
                 meta_decision = evaluate_meta_gate(final_decision.decision, regime_profile, bundle, self.settings)
                 elapsed_ms = (perf_counter()-t0)*1000.0
@@ -812,6 +932,29 @@ class RealSignalEngine:
                     final_decision.vote_detail.setdefault("quality_size_mult", qd.size_multiplier)
         except Exception as e:
             logger.debug("Quality gates integration error: {}", e)
+
+        # ------------------------------------------------------------------
+        # Sprint 46 Economic Event Gate (after quality gates, before legacy news/vol). Applies
+        # veto or size dampen based on econ feature pack produced earlier.
+        # ------------------------------------------------------------------
+        try:
+            if final_decision.decision in ('LONG','SHORT') and getattr(feature_vector, 'econ', None):
+                econ_feats = feature_vector.econ
+                econ_cfg = (self.settings.get('econ') or {}) if isinstance(self.settings, dict) else {}
+                # Veto if policy says severity high and inside window and allow_veto enabled
+                sev = getattr(econ_feats, 'econ_severity', None)
+                side = getattr(econ_feats, 'econ_window_side', None)
+                size_mult = getattr(econ_feats, 'allowed_size_mult_econ', None)
+                allow_veto = bool(econ_cfg.get('apply_veto', True))
+                if sev == 'high' and side in ('pre','live') and allow_veto and econ_feats.econ_risk_active:
+                    final_decision.decision = 'FLAT'
+                    final_decision.vetoes.append('ECON_VETO')
+                    final_decision.vote_detail.setdefault('reason','ECON_VETO')
+                    final_decision.vote_detail.setdefault('econ_gate', {'action':'VETO','severity':sev,'side':side})
+                elif size_mult is not None and size_mult < 1.0:
+                    final_decision.vote_detail.setdefault('econ_gate', {'action':'DAMPEN','severity':sev,'side':side,'size_mult':size_mult})
+        except Exception as e:  # pragma: no cover
+            logger.debug('Econ gate error: {}', e)
 
         # ------------------------------------------------------------------
         # Sprint 28 Event Gate (macro / crypto incidents)
@@ -994,6 +1137,23 @@ class RealSignalEngine:
                         book = get_bh(symbol)
                 except Exception:
                     book = None
+                # attach of_micro_score into book meta if engine available
+                try:
+                    if getattr(self, '_of_engine', None) is not None and book is not None:
+                        m = self._of_engine.compute_micro_score()
+                        # best-effort attach
+                        try:
+                            setattr(book, 'of_micro_score', float(m.get('of_micro_score') or 0.0))
+                            setattr(book, 'of_micro_components', dict(m.get('components') or {}))
+                        except Exception:
+                            # fallback: store inside meta dict if exists
+                            try:
+                                if hasattr(book, 'meta') and isinstance(book.meta, dict):
+                                    book.meta['of_micro_score'] = float(m.get('of_micro_score') or 0.0)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
                 lq_gate_outcome = liquidity_gate.evaluate_gate(symbol, ts_epoch, profile, book, self.settings, getattr(self, "_lq_gate", None))
                 # Persist decision (best-effort)
                 try:
@@ -1329,6 +1489,98 @@ class RealSignalEngine:
                                     "clusters": clusters,
                                     "clipped": sz_res.clipped
                                 })
+                                # --- Sprint 53: Liquidity-Adjusted VaR computation and exec hint ---
+                                try:
+                                    if getattr(self, '_lvar_engine', None) is not None and getattr(self, '_exec_adapter', None) is not None:
+                                        price_now = float(feature_vector.ohlcv.get('close', 0.0))
+                                        # notional and qty for proposed size
+                                        proposed_notional = float(final_decision.vote_detail["position_sizer"]["size_quote"]) or 0.0
+                                        q = proposed_notional / (price_now or 1.0)
+                                        # ADV best-effort: try volumetric features or settings
+                                        adv = float((self.settings.get('market') or {}).get('adv_usd', 0.0) or 0.0)
+                                        # book depth best-effort from FeatureStore
+                                        try:
+                                            bd = self.feature_store.get_book_ticker(symbol)
+                                            book_depth = float((bd[1] if bd and len(bd)>1 else 0.0) + (bd[3] if bd and len(bd)>3 else 0.0)) if bd else 0.0
+                                        except Exception:
+                                            book_depth = 0.0
+                                        # lambda estimate
+                                        lam = None
+                                        try:
+                                            lam = self.feature_store.get_lambda_for(symbol)
+                                        except Exception:
+                                            lam = None
+                                        # sigma / vol forecast
+                                        sigma = None
+                                        try:
+                                            vol_obj = features.get('volatility') if isinstance(features, dict) else None
+                                            sigma = float(getattr(vol_obj, 'sigma', None) or getattr(vol_obj, 'atr', None) or 0.0)
+                                        except Exception:
+                                            sigma = 0.0
+                                        # z_alpha (VaR quantile) from settings
+                                        z_alpha = float((self.settings.get('risk') or {}).get('var_z', 2.33))
+                                        pr = float((self.settings.get('risk') or {}).get('participation_rate', 0.12))
+                                        lvar_out = self._lvar_engine.compute(sigma=sigma, z_alpha=z_alpha, notional=proposed_notional, price=price_now, q=q, adv=adv, pr=pr, book_depth=book_depth, lam=lam, stress_multiplier=float((self.settings.get('risk') or {}).get('stress_mult', 1.0)))
+                                        # attach feature view for downstream transports
+                                        final_decision.vote_detail.setdefault('risk_liquidity', {})
+                                        final_decision.vote_detail['risk_liquidity'].update({
+                                            'lvar_$': round(lvar_out.lvar_usd, 2),
+                                            'lvar_pct_equity': round(lvar_out.lvar_pct_equity, 6),
+                                            'liq_cost_$': round(lvar_out.liq_cost_usd, 2),
+                                            'ttl_minutes': round(lvar_out.ttl_minutes, 2),
+                                            'stress_factor': lvar_out.stress_factor,
+                                        })
+                                        # Exec suggestion
+                                        sug = self._exec_adapter.suggest(lvar_pct=lvar_out.lvar_pct_equity, liq_cost_pct=(lvar_out.liq_cost_usd / max(1e-12, float(equity))) if hasattr(self,'_lvar_engine') else 0.0, ttl_minutes=lvar_out.ttl_minutes)
+                                        final_decision.vote_detail['risk_liquidity'].update({'size_suggested_mult': sug.size_multiplier, 'exec_style_hint': sug.exec_style, 'exec_reason': sug.reason})
+                                        # apply suggestion multiplicatively to position_size
+                                        try:
+                                            if sug.size_multiplier == 0.0:
+                                                # veto trade
+                                                final_decision.decision = 'FLAT'
+                                                final_decision.vetoes.append('LVAR_VETO')
+                                                final_decision.vote_detail.setdefault('reason', 'LVAR_VETO')
+                                            else:
+                                                if final_decision.vote_detail.get('position_sizer') and final_decision.vote_detail['position_sizer'].get('size_quote'):
+                                                    base_sz = float(final_decision.vote_detail['position_sizer']['size_quote'])
+                                                    new_sz = round(base_sz * float(sug.size_multiplier), 2)
+                                                    final_decision.vote_detail['position_sizer']['size_quote'] = new_sz
+                                                    final_decision.vote_detail['position_sizer']['lvar_scaled'] = True
+                                                    final_decision.vote_detail['position_sizer']['lvar_size_mult'] = sug.size_multiplier
+                                        except Exception:
+                                            pass
+                                        # Persist risk_liquidity row into FeatureStore macro export buffer for diagnostics
+                                        try:
+                                            # Only emit if feature-store diagnostics are enabled in settings to avoid overhead
+                                            emit_diag = bool((self.settings.get('cross_asset', {}) or {}).get('diagnostics', {}).get('emit', False))
+                                            if emit_diag and getattr(self, 'feature_store', None) is not None:
+                                                try:
+                                                    rl = final_decision.vote_detail.get('risk_liquidity') or {}
+                                                    row = {
+                                                        'symbol': symbol,
+                                                        'ts': ts_epoch,
+                                                        'lvar_usd': rl.get('lvar_$'),
+                                                        'lvar_pct_equity': rl.get('lvar_pct_equity'),
+                                                        'liq_cost_usd': rl.get('liq_cost_$'),
+                                                        'ttl_minutes': rl.get('ttl_minutes'),
+                                                        'stress_factor': rl.get('stress_factor'),
+                                                        'size_suggested_mult': rl.get('size_suggested_mult'),
+                                                        'exec_style_hint': rl.get('exec_style_hint'),
+                                                        'exec_reason': rl.get('exec_reason')
+                                                    }
+                                                    # best-effort call into internal buffer helper (FeatureStore exposes this internally)
+                                                    if hasattr(self.feature_store, '_buffer_macro_row'):
+                                                        try:
+                                                            self.feature_store._buffer_macro_row(row)
+                                                        except Exception:
+                                                            # swallow to avoid breaking engine
+                                                            pass
+                                                except Exception:
+                                                    pass
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
                                 # Apply playbook size scaling if present
                                 try:
                                     plan_pb = final_decision.vote_detail.get("playbook")
@@ -1608,6 +1860,48 @@ class RealSignalEngine:
                         final_decision.vote_detail.setdefault("reason", "HIGH_CORR_QG")
             except Exception:
                 pass
+
+        # --- NEW: Drift policy evaluation & telemetry / audit hooks ---
+        try:
+            if getattr(self, '_policy_engine', None) is not None and final_decision is not None:
+                # Build compact metrics snapshot from vote_detail
+                vd = final_decision.vote_detail if isinstance(final_decision.vote_detail, dict) else {}
+                metrics = {
+                    'sprt_state': vd.get('sprt', {}).get('state') if vd.get('sprt') else vd.get('sprt_state'),
+                    'pf_delta_pct': vd.get('pf_delta_pct') or vd.get('pf_delta') or 0.0,
+                    'maxdd_p95_breach': vd.get('maxdd_p95_breach') or vd.get('maxdd_breach') or False,
+                    'ece_live': vd.get('ece') or vd.get('ece_live') or 0.0,
+                    'slip_delta_bps': vd.get('slip_bps') or vd.get('slip_delta_bps') or 0.0,
+                }
+                action = self._policy_engine.evaluate(metrics)
+                # Emit telemetry if telemetry logger present in settings injected objects
+                try:
+                    tel = (self.settings.get('_telemetry') or None)
+                    if tel and hasattr(tel, 'emit_policy_action'):
+                        tel.emit_policy_action(final_decision.symbol if hasattr(final_decision,'symbol') else symbol, 0, {'type': action.type.value if hasattr(action,'type') else str(action.type), 'size_mult': action.size_mult, 'reason_codes': list(action.reason_codes), 'timestamp': action.timestamp}, metrics)
+                except Exception:
+                    pass
+                # Persist audit record (best-effort) into DB
+                try:
+                    from ultra_signals.persist.db import record_policy_action, write_retrain_job
+                    ts_rec = int(final_decision.ts or ts_epoch)
+                    record_policy_action(final_decision.symbol, ts_rec, action.type.value if hasattr(action,'type') else str(action.type), float(action.size_mult or 1.0), list(action.reason_codes) if getattr(action,'reason_codes',None) else None, metrics)
+                    # If retrain requested, write job to configured queue_dir
+                    if getattr(action, 'type', None) and (str(action.type).lower() == 'retrain' or (hasattr(action,'type') and action.type == action.type.RETRAIN)):
+                        qdir = (self.settings.get('retrain') or {}).get('queue_dir') if isinstance(self.settings, dict) else None
+                        job = {
+                            'model': (self.settings.get('model_id') or 'alpha_model'),
+                            'symbol': final_decision.symbol,
+                            'trigger_ts': ts_rec,
+                            'metrics': metrics,
+                            'reason_codes': list(action.reason_codes) if getattr(action,'reason_codes',None) else []
+                        }
+                        if qdir:
+                            write_retrain_job(qdir, job)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         return final_decision
 

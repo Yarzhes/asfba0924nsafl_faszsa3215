@@ -1,0 +1,10 @@
+{
+  "version": "v1",
+  "kind": "exchange",
+  "confidence": "high",
+  "addresses": [
+    "0xExchangeAddr1",
+    "0xExchangeAddr2"
+  ],
+  "meta": {"source": "test-sample"}
+}

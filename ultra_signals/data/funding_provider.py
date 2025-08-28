@@ -24,7 +24,9 @@ class FundingProvider:
         :param config: The configuration dictionary for the funding provider.
         """
         self.refresh_interval_seconds = config.get("refresh_interval_minutes", 15) * 60
-        self._cache: Dict[Symbol, List[Dict]] = {}
+        # internal cache may hold per-symbol list OR per-venue dict of lists
+        # structure: _cache[symbol] -> list[dict] OR {venue: [dict,...]}
+        self._cache = {}
         self._client = httpx.AsyncClient()
         logger.info(
             f"FundingProvider initialized with a {self.refresh_interval_seconds / 60}-minute refresh interval."
@@ -50,17 +52,34 @@ class FundingProvider:
                 logger.warning(f"Funding rate API did not return a list. Got: {type(data)}")
                 return
 
+            # Try to handle either single-venue list or multi-venue dict
             for item in data:
                 symbol = item.get("symbol")
                 if not symbol:
                     logger.warning("Found funding rate item with no symbol.")
                     continue
-
                 history_item = {
                     "funding_rate": float(item.get("fundingRate", 0.0)),
                     "funding_time": int(item.get("fundingTime", 0)),
+                    "venue": item.get("venue") or item.get("exchange") or "unknown",
                 }
-                self._cache[symbol] = [history_item]
+                # if we already have a per-venue dict, append
+                cur = self._cache.get(symbol)
+                if isinstance(cur, dict):
+                    v = history_item.get('venue') or 'unknown'
+                    cur.setdefault(v, []).append(history_item)
+                    self._cache[symbol] = cur
+                else:
+                    # start as simple list when no venue info
+                    if history_item.get('venue') == 'unknown':
+                        self._cache[symbol] = [history_item]
+                    else:
+                        # convert existing list into dict under inferred venue if present
+                        d = {}
+                        if isinstance(cur, list):
+                            d.setdefault('unknown', []).extend(cur)
+                        d.setdefault(history_item.get('venue'), []).append(history_item)
+                        self._cache[symbol] = d
 
             logger.info(f"Successfully refreshed funding rate data for {len(data)} symbols.")
 
@@ -85,4 +104,76 @@ class FundingProvider:
         :param symbol: The symbol to retrieve data for.
         :return: A list of historical funding rate data points, or None if not in cache.
         """
-        return self._cache.get(symbol)
+        cur = self._cache.get(symbol)
+        if cur is None:
+            return None
+        if isinstance(cur, dict):
+            # flatten: prefer last value per-venue concatenated
+            out = []
+            for v, lst in cur.items():
+                out.extend(lst or [])
+            # sort by funding_time
+            try:
+                out = sorted(out, key=lambda x: int(x.get('funding_time', 0)))
+            except Exception:
+                pass
+            return out
+        return cur
+
+    def get_per_venue_history(self, symbol: Symbol) -> Optional[Dict[str, List[Dict]]]:
+        cur = self._cache.get(symbol)
+        if cur is None:
+            return None
+        if isinstance(cur, dict):
+            return cur
+        return {'unknown': cur}
+
+    def get_predicted(self, symbol: Symbol) -> Optional[float]:
+        """Return a best-effort predicted next funding rate for symbol (if available).
+        This is a lightweight heuristic (last value or average delta) unless a real predictor
+        is implemented in the provider subclass.
+        """
+        try:
+            hist = self.get_history(symbol) or []
+            if not hist:
+                return None
+            # naive: use last observed funding_rate
+            last = hist[-1].get('funding_rate')
+            return float(last) if last is not None else None
+        except Exception:
+            return None
+
+    def load_replay(self, symbol: Symbol, records: List[Dict]) -> None:
+        """
+        Load a list of funding/OI records into the internal cache for replay/testing.
+
+        Each record should be a dict containing at least:
+          - 'funding_rate' (float)
+          - 'funding_time' (int ms epoch) or 'funding_time_ms'
+          - optional 'venue' and 'oi_notional'
+
+        This replaces any existing cache entry for the symbol with a sorted list.
+        """
+        try:
+            if not records:
+                return
+            out = []
+            for r in records:
+                fr = float(r.get('funding_rate') or r.get('fund') or 0.0)
+                ft = r.get('funding_time') or r.get('funding_time_ms') or r.get('ts') or None
+                try:
+                    ft = int(ft) if ft is not None else None
+                except Exception:
+                    ft = None
+                venue = r.get('venue') or r.get('exchange') or 'unknown'
+                item = {'funding_rate': fr, 'funding_time': ft or 0, 'venue': venue}
+                if 'oi_notional' in r:
+                    try:
+                        item['oi_notional'] = float(r.get('oi_notional'))
+                    except Exception:
+                        pass
+                out.append(item)
+            out = sorted(out, key=lambda x: int(x.get('funding_time', 0)))
+            self._cache[symbol] = out
+        except Exception:
+            logger.exception('FundingProvider.load_replay failed')

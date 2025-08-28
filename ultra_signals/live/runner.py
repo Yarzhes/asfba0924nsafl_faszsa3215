@@ -21,6 +21,7 @@ from .state_store import StateStore
 from .safety import SafetyManager
 from .metrics import Metrics
 from ultra_signals.persist.db import init_db as persist_init_db, snapshot_settings_fingerprint, fetchone as persist_fetchone, upsert_order_pending
+from ultra_signals.orderflow.persistence import FeatureViewWriter
 from ultra_signals.persist.migrations import apply_migrations as persist_apply_migrations
 from ultra_signals.persist import reconcile as persist_reconcile
 import os, socket, uuid, time  # os/time already imported above; kept for clarity
@@ -63,13 +64,52 @@ class LiveRunner:
         )
         self.metrics = Metrics()
         self.feed = FeedAdapter(settings, self.feed_q, venue_router=None)
+        # feature writer for execution telemetry (VWAP/TWAP slices)
+        fv_path = getattr(live_cfg, 'feature_view_path', 'orderflow_features.db') if live_cfg else 'orderflow_features.db'
+        try:
+            self.feature_writer = FeatureViewWriter(sqlite_path=fv_path)
+        except Exception:
+            self.feature_writer = None
+
+        # Initialize a singleton TCA engine used across components
+        try:
+            from ultra_signals.tca.tca_engine import TCAEngine
+            self.tca_engine = TCAEngine(logfile=getattr(live_cfg, 'tca_log', None) or 'tca_events.jsonl', latency_lambda=float(getattr(live_cfg, 'tca_latency_lambda', 0.001)))
+        except Exception:
+            self.tca_engine = None
+        # alert cadence & watched symbols
+        try:
+            self._tca_alert_cadence = int(getattr(live_cfg, 'tca_alert_cadence', 1) or 1)
+        except Exception:
+            self._tca_alert_cadence = 1
+        try:
+            self._tca_watched_symbols = set(getattr(live_cfg, 'tca_watched_symbols', []) or [])
+        except Exception:
+            self._tca_watched_symbols = set()
+
         self.engine = EngineWorker(
             self.feed_q,
             self.order_q,
             latency_budget_ms=latency_budget_ms,
             metrics=self.metrics,
             safety=self.safety,
+            feature_writer=self.feature_writer,
         )
+        # attach tca engine if available
+        try:
+            if self.tca_engine is not None:
+                setattr(self.engine, 'tca_engine', self.tca_engine)
+                # provide system alert publisher so TCAEngine can publish via existing infra
+                try:
+                    if publish_alert:
+                        try:
+                            self.tca_engine.set_alert_publisher(publish_alert)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
         try:
             self.engine.feed_ref = self.feed  # for composite mid & DQ context
         except Exception:
@@ -124,6 +164,12 @@ class LiveRunner:
                 if "bybit_perp" in wanted:
                     adapters["bybit_perp"] = BybitPerpPaper(mapper, dry_run=True)
                 self.venue_router = VenueRouter(adapters, mapper, cfg_dict)
+                # attach tca engine to venue router if supported
+                try:
+                    if self.tca_engine is not None:
+                        setattr(self.venue_router, 'tca_engine', self.tca_engine)
+                except Exception:
+                    pass
                 async def _send(plan, client_id):
                     if not self.venue_router:
                         return None
@@ -146,8 +192,15 @@ class LiveRunner:
             safety=self.safety,
             metrics=self.metrics,
             order_sender=order_sender,
-            simulator_cfg=getattr(live_cfg, "simulator", {}) if hasattr(live_cfg, "simulator") else {},
+            feature_writer=self.feature_writer,
+            simulator_cfg=getattr(live_cfg, 'simulator', {}) if hasattr(live_cfg, 'simulator') else {},
         )
+        # attach tca engine to executor for record_rejects/other hooks
+        try:
+            if self.tca_engine is not None:
+                setattr(self.executor, 'tca_engine', self.tca_engine)
+        except Exception:
+            pass
         self._tasks = []
         self._supervisor_task: Optional[asyncio.Task] = None
         self._http_site = None
@@ -439,6 +492,42 @@ class LiveRunner:
                             Path(hb_dir).mkdir(parents=True, exist_ok=True)
                             with open(PurePath(hb_dir)/"heartbeat.txt", "w", encoding="utf-8") as f:
                                 f.write(str(int(time.time())))
+                except Exception:
+                    pass
+                # TCA alerts check (best-effort)
+                try:
+                    if getattr(self, 'tca_engine', None) is not None:
+                        # cadence: only run every N loops
+                        if not hasattr(self, '_tca_loop_counter'):
+                            self._tca_loop_counter = 0
+                        self._tca_loop_counter = (self._tca_loop_counter + 1) % max(1, int(self._tca_alert_cadence or 1))
+                        if self._tca_loop_counter == 0:
+                            try:
+                                # global check
+                                self.tca_engine.check_alerts()
+                                # per-symbol checks for watched symbols only (if configured)
+                                if self._tca_watched_symbols:
+                                    for s in list(self._tca_watched_symbols):
+                                        # schedule per-symbol checks respecting last-checked timestamps
+                                        last = None
+                                        try:
+                                            last = self.tca_engine._get_symbol_last_checked(s)
+                                        except Exception:
+                                            last = None
+                                        now_ms = int(time.time() * 1000)
+                                        # default per-symbol cadence equals global cadence in ms
+                                        per_symbol_cadence_ms = int(getattr(self.settings.live, 'tca_alert_symbol_cadence_ms', 60*1000))
+                                        if last is None or (now_ms - int(last)) >= per_symbol_cadence_ms:
+                                            try:
+                                                self.tca_engine.check_alerts(symbol=s)
+                                                try:
+                                                    self.tca_engine._mark_symbol_checked(s)
+                                                except Exception:
+                                                    pass
+                                            except Exception:
+                                                pass
+                            except Exception:
+                                pass
                 except Exception:
                     pass
                 # simple control directory flag handling

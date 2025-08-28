@@ -9,6 +9,7 @@ import numpy as np
 from ultra_signals.core.custom_types import FeatureVector, DerivativesFeatures, RegimeFeatures
 from ultra_signals.features.orderbook import OrderbookFeatures
 from loguru import logger
+from ultra_signals.patterns.feature_bridge import extract_pattern_features
 
 
 # ---------- helpers ------------------------------------------------------------
@@ -187,6 +188,36 @@ def component_scores(features: FeatureVector, config_params: Dict) -> Dict[str, 
     pullback = trend_pullback_score(getattr(features, "volume_flow", {}) or {}, getattr(features, "orderbook", None), config_params)
     breakout = breakout_score(getattr(features, "derivatives", None), getattr(features, "orderbook", None))
 
+    # Patterns: if FeatureVector supplies a 'patterns' dict/list, map to numeric bucket
+    patterns_val = 0.0
+    try:
+        # prefer explicit pattern features (dict)
+        pat_feats = getattr(features, "patterns", None)
+        if isinstance(pat_feats, dict):
+            # expected keys from feature_bridge
+            w = (config_params.get('patterns', {}) or {}).get('weights', {})
+            cw = float(w.get('candle_bull', 0.6))
+            bw = float(w.get('candle_bear', 0.6))
+            sbw = float(w.get('structure_breakout', 0.8))
+            revw = float(w.get('reversal', 0.7))
+            contw = float(w.get('continuation', 0.5))
+            patterns_val = (cw * pat_feats.get('candle_bull_score', 0.0) - bw * pat_feats.get('candle_bear_score', 0.0)
+                            + sbw * pat_feats.get('structure_breakout_score', 0.0)
+                            + revw * pat_feats.get('reversal_score', 0.0)
+                            + contw * pat_feats.get('continuation_score', 0.0))
+        else:
+            # try to compute via bridge if ohlcv present
+            ohlcv = getattr(features, 'ohlcv', {}) or {}
+            if hasattr(ohlcv, 'index'):
+                # ohlcv is likely a DataFrame; build features via bridge
+                try:
+                    pf = extract_pattern_features(ohlcv, None, config_params.get('patterns', {}))
+                    patterns_val = float(pf.get('candle_bull_score', 0.0) - pf.get('candle_bear_score', 0.0))
+                except Exception:
+                    patterns_val = 0.0
+    except Exception:
+        patterns_val = 0.0
+
     scores = {
         "trend": trend,
         "momentum": momentum,
@@ -195,6 +226,7 @@ def component_scores(features: FeatureVector, config_params: Dict) -> Dict[str, 
         "derivatives": derivatives,
         "pullback_confluence": pullback,
         "breakout_confluence": breakout,
+    "patterns": float(max(-1.0, min(1.0, patterns_val))) ,
     }
 
     rs = getattr(features, "rs", {}) or {}

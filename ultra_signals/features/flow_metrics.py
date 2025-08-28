@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 import numpy as np
 from loguru import logger
+from .vpin import VPINEngine, fuse_toxicity
 
 # Light EMA helper
 _DEF_EPS = 1e-9
@@ -133,6 +134,35 @@ def compute_flow_metrics(
         except Exception:
             pass
 
+        # VPIN integration: maintain engine in state per-symbol
+        try:
+            vp_cfg = (settings or {}).get('features', {}).get('vpin', {})
+            if vp_cfg.get('enabled', True):
+                vp_key = f"vpin_engine_{vp_cfg.get('id','default')}"
+                engine: VPINEngine = state.get(vp_key)
+                if engine is None:
+                    engine = VPINEngine(V_bucket=float(vp_cfg.get('V_bucket', 250000)), K_buckets=int(vp_cfg.get('K_buckets', 50)))
+                    state[vp_key] = engine
+                # ingest trades list (expects (ts, price, qty, is_buyer_maker))
+                for tr in trades:
+                    try:
+                        engine.ingest_trade(tr, book_top=(book_top or {}))
+                    except Exception:
+                        pass
+                # partial bucket estimate
+                p = engine.finalize_partial()
+                out.update({
+                    'bucket_fill_ratio': p.get('bucket_fill_ratio'),
+                    'bucket_time_sec': p.get('bucket_time_sec'),
+                    'class_error_est': p.get('class_error_est'),
+                })
+                v = engine.get_latest_vpin()
+                out.update(v)
+                # include small summary
+                out['vpin_total_buckets'] = engine.get_buckets_summary().get('total_buckets')
+        except Exception as e:
+            logger.debug('VPIN compute fail: {}', e)
+
         # Open interest stub (placeholder: expects externally fed state)
         try:
             oi_series = state.get('oi_series')  # list of floats
@@ -205,6 +235,44 @@ def compute_flow_metrics(
                 out['volume_anom'] = 1 if abs(vol_z) >= thr else 0
         except Exception:
             pass
+
+        # Toxicity fusion: combine vpin_z with other z-scores into a tox_score
+        try:
+            tox_cfg = (settings or {}).get('features', {}).get('vpin', {}).get('toxicity', {})
+            if tox_cfg.get('enabled', True):
+                vpin_z = out.get('vpin_z', 0.0)
+                ofi_z = None
+                if 'ofi' in out:
+                    ofi_z = float(out.get('ofi'))
+                spread_z = None
+                if 'spread_bps' in out:
+                    spread_z = float(out.get('spread_bps'))
+                micro_vol_z = out.get('volume_z')
+                depth_imb_z = out.get('depth_imbalance')
+                liq_burst_z = 1.0 if out.get('liq_cluster') else 0.0
+                weights = tox_cfg.get('weights')
+                tox_score = fuse_toxicity(vpin_z, ofi_z, spread_z, micro_vol_z, depth_imb_z, liq_burst_z, weights=weights)
+                out['tox_score'] = float(tox_score)
+                hi = float(tox_cfg.get('hi_th', tox_cfg.get('hi', 0.8)))
+                lo = float(tox_cfg.get('lo_th', tox_cfg.get('lo', 0.65)))
+                prev = state.get('vpin_tox_state', 'normal')
+                # hysteresis
+                if prev != 'toxic' and tox_score >= hi:
+                    state['vpin_tox_state'] = 'toxic'
+                    out['vpin_state'] = 'toxic'
+                    out['tox_flag'] = True
+                elif prev == 'toxic' and tox_score <= lo:
+                    state['vpin_tox_state'] = 'cooldown'
+                    out['vpin_state'] = 'cooldown'
+                    out['tox_flag'] = False
+                else:
+                    out['vpin_state'] = prev
+                    out['tox_flag'] = (prev == 'toxic')
+                # cooldown bars if configured
+                if out.get('vpin_state') == 'cooldown':
+                    out['tox_cooldown_bars'] = int(tox_cfg.get('cooldown_bars', 3))
+        except Exception as e:
+            logger.debug('Toxicity fusion fail: {}', e)
 
     except Exception as e:
         logger.exception('Flow metrics compute fatal: {}', e)

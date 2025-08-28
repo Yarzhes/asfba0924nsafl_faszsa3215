@@ -29,6 +29,23 @@ def format_message(decision: EnsembleDecision, opts: dict = {}) -> str:
 
     parts = [title, "", conf, vote]
 
+    # Insert compact pre-trade summary line if attached
+    try:
+        pre = None
+        if isinstance(decision.vote_detail, dict):
+            pre = decision.vote_detail.get('pre_trade')
+        if pre and isinstance(pre, dict):
+            pwin = pre.get('p_win')
+            regime = pre.get('regime') or 'n/a'
+            veto_ct = pre.get('veto_count', 0)
+            lat = pre.get('lat_ms') or {}
+            p50 = lat.get('p50') if isinstance(lat, dict) else None
+            p90 = lat.get('p90') if isinstance(lat, dict) else None
+            line = f"PRE: p={pwin:.2f} reg={regime} veto={veto_ct} lat_p50={p50:.1f}ms p90={p90:.1f}ms" if pwin is not None else f"PRE: reg={regime} veto={veto_ct}"
+            parts.append(line)
+    except Exception:
+        pass
+
     # Sprint 30: MTC line (compact)
     try:
         mtc = decision.vote_detail.get('mtc_gate') if isinstance(decision.vote_detail, dict) else None
@@ -176,6 +193,36 @@ def format_message(decision: EnsembleDecision, opts: dict = {}) -> str:
     except Exception:
         pass
 
+    # Derivatives posture summary (funding / OI) — compact one-liner
+    try:
+        deriv = None
+        # prefer explicit derivatives object in vote_detail (or top-level fields)
+        if isinstance(decision.vote_detail, dict):
+            deriv = decision.vote_detail.get('derivatives') or decision.vote_detail.get('deriv')
+        # fallback: some transports embed funding_z at top-level
+        if deriv is None and isinstance(decision.vote_detail, dict) and 'funding_z' in decision.vote_detail:
+            deriv = {'funding_z': decision.vote_detail.get('funding_z'), 'funding_pctl': decision.vote_detail.get('funding_pctl'), 'oi_taxonomy': decision.vote_detail.get('oi_taxonomy'), 'deriv_posture_score': decision.vote_detail.get('deriv_posture_score')}
+        if deriv:
+            try:
+                fz = getattr(deriv, 'funding_z', None) if hasattr(deriv, '__dict__') or isinstance(deriv, object) else deriv.get('funding_z')
+            except Exception:
+                fz = None
+            try:
+                pctl = getattr(deriv, 'funding_pctl', None) if hasattr(deriv, '__dict__') or isinstance(deriv, object) else deriv.get('funding_pctl')
+            except Exception:
+                pctl = None
+            try:
+                oi_tax = getattr(deriv, 'oi_taxonomy', None) if hasattr(deriv, '__dict__') or isinstance(deriv, object) else deriv.get('oi_taxonomy')
+            except Exception:
+                oi_tax = None
+            try:
+                score = getattr(deriv, 'deriv_posture_score', None) if hasattr(deriv, '__dict__') or isinstance(deriv, object) else deriv.get('deriv_posture_score')
+            except Exception:
+                score = None
+            parts.append(_esc_md(f"Derivs: funding {float(fz):+.2f}\u03c3" if fz is not None else "Derivs: funding n/a") + (f" (pctl {int(pctl*100)})" if pctl is not None else "") + (f" | {oi_tax}" if oi_tax else "") + (f" | score {float(score):.2f}" if score is not None else ""))
+    except Exception:
+        pass
+
     # Sprint 41 Whale / Smart Money context line (expects aggregated whale snapshot under vote_detail['whales'])
     try:
         wf = decision.vote_detail.get('whales') if isinstance(decision.vote_detail, dict) else None
@@ -240,11 +287,15 @@ def format_message(decision: EnsembleDecision, opts: dict = {}) -> str:
                 if probs and label in probs:
                     top_prob = probs[label]
                 pieces = []
+                # Include confidence flag if available
+                cf_flag = reg.get('regime_confidence_flag')
                 if label:
                     if top_prob is not None:
                         pieces.append(f"Regime: {label} {top_prob*100:.0f}%")
                     else:
                         pieces.append(f"Regime: {label}")
+                if cf_flag:
+                    pieces.append(f"Conf:{cf_flag}")
                 if haz is not None:
                     try:
                         pieces.append(f"Haz {float(haz)*100:.0f}%")
@@ -263,6 +314,52 @@ def format_message(decision: EnsembleDecision, opts: dict = {}) -> str:
                         pass
                 if pieces:
                     parts.append(_esc_md(' | '.join(pieces)))
+    except Exception:
+        pass
+
+    # Sprint 53: Liquidity / L-VaR one-liner (compact)
+    try:
+        rl = decision.vote_detail.get('risk_liquidity') if isinstance(decision.vote_detail, dict) else None
+        if isinstance(rl, dict):
+            lvar_usd = rl.get('lvar_$')
+            lvar_pct = rl.get('lvar_pct_equity')
+            liq_cost = rl.get('liq_cost_$')
+            ttl = rl.get('ttl_minutes')
+            size_mult = rl.get('size_suggested_mult')
+            exec_hint = rl.get('exec_style_hint')
+            pieces = []
+            try:
+                if lvar_usd is not None:
+                    pieces.append(f"L-VaR: ${float(lvar_usd):,.0f}")
+            except Exception:
+                pass
+            try:
+                if lvar_pct is not None:
+                    pieces.append(f"({float(lvar_pct)*100:.2f}% eq)")
+            except Exception:
+                pass
+            try:
+                if liq_cost is not None:
+                    pieces.append(f"Liq ${float(liq_cost):,.0f}")
+            except Exception:
+                pass
+            try:
+                if ttl is not None:
+                    pieces.append(f"TTL {float(ttl):.0f}m")
+            except Exception:
+                pass
+            try:
+                if size_mult is not None:
+                    pieces.append(f"Size×{float(size_mult):.2f}")
+            except Exception:
+                pass
+            try:
+                if exec_hint:
+                    pieces.append(f"Exec:{str(exec_hint)}")
+            except Exception:
+                pass
+            if pieces:
+                parts.append(_esc_md(' | '.join(pieces)))
     except Exception:
         pass
 

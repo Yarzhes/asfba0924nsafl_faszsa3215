@@ -21,6 +21,13 @@ from .funding import compute_funding_features
 from .cvd import compute_cvd_features
 from .alpha_v2 import compute_alpha_v2_features
 
+# Compatibility aliases (legacy names used across the codebase)
+compute_momentum = compute_momentum_features
+compute_trend = compute_trend_features
+compute_volatility = compute_volatility_features
+compute_volume_flow = compute_volume_flow_features
+compute_orderbook = compute_orderbook_features
+
 
 # You can define a __all__ to control what `from features import *` does,
 # which is good practice for libraries.
@@ -34,4 +41,11 @@ __all__ = [
     "compute_funding_features",
     "compute_cvd_features",
     "compute_alpha_v2_features",
+    "compute_orderbook_features_v2",
 ]
+
+# alias advanced orderbook fn
+try:
+    from .orderbook import compute_orderbook_features_v2
+except Exception:
+    compute_orderbook_features_v2 = None

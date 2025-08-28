@@ -1,0 +1,7 @@
+{
+  "version": "v1",
+  "kind": "bridge",
+  "confidence": "medium",
+  "addresses": ["0xBridgeA"],
+  "meta": {"source": "test"}
+}

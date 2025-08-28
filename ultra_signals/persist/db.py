@@ -125,6 +125,45 @@ def record_liquidity_decision(symbol: str, ts: int, profile: str, action: str, r
         logger.debug(f"[DB] liquidity decision insert failed: {e}")
 
 
+# Record policy action decisions (drift / retrain / pause / shrink)
+def record_policy_action(symbol: str, ts: int, action_type: str, size_mult: float | None, reason_codes: str | None, meta: Dict[str, Any] | None = None):
+    """Persist a compact policy action for audit and dashboarding.
+
+    This follows the same best-effort pattern as other record helpers.
+    """
+    try:
+        # normalize
+        rc = ','.join(reason_codes) if isinstance(reason_codes, (list, tuple)) else (reason_codes or None)
+    except Exception:
+        rc = None
+    try:
+        with tx() as cur:
+            cur.execute(
+                """INSERT INTO policy_actions(ts,symbol,action_type,size_mult,reason_codes,meta)
+                      VALUES(?,?,?,?,?,?)""",
+                (ts, symbol, action_type, size_mult, rc, str(meta) if meta is not None else None)
+            )
+    except Exception as e:  # pragma: no cover
+        logger.debug(f"[DB] policy action insert failed: {e}")
+
+
+def write_retrain_job(queue_dir: str, job: Dict[str, Any]):
+    """Durably write a retrain job as one-line JSONL into queue_dir.
+
+    This is a simple fallback delivery mechanism until S27 API details are provided.
+    """
+    try:
+        import json
+        p = Path(queue_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        fname = f"retrain_{int(time.time()*1000)}_{os.getpid()}.jsonl"
+        full = p / fname
+        with full.open('w', encoding='utf-8') as f:
+            f.write(json.dumps(job, default=str) + "\n")
+    except Exception as e:
+        logger.debug(f"[DB] write_retrain_job failed: {e}")
+
+
 def upsert_order_pending(order: Dict[str, Any]):
     """Journal-first write: insert PENDING order if absent.
     order dict MUST include: client_order_id, venue, symbol, side, type, qty, price, reduce_only,

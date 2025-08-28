@@ -115,25 +115,37 @@ class AbstractOrderBook:
 
 # ----------------------------- Broker Simulator -----------------------------
 class BrokerSim:
-    def __init__(self, settings: Dict[str, Any], ob_model: AbstractOrderBook, rng_seed: int=42, venue: str='SIM'):
+    def __init__(self, settings: Dict[str, Any], ob_model: AbstractOrderBook, rng_seed: int=42, venue: str='SIM', lambda_provider: Optional[callable]=None):
+        # basic config & RNG
         self.cfg = settings or {}
         self.venue = venue
         self.rng = random.Random(int(rng_seed))
         self.clock = SimClock(0, self.rng)
+
+        # venue-level settings
         venue_cfg = ((self.cfg.get('venues') or {}).get(venue) or {})
         lat_cfg = (venue_cfg.get('latency_ms') or {})
         self.lat_sampler = LatencySampler(lat_cfg, self.rng)
+
         slip_cfg = (venue_cfg.get('slippage') or {})
         self.impact_factor = float(slip_cfg.get('impact_factor', 0.5))
         self.jitter_sampler = JitterSampler(slip_cfg.get('jitter_bps') or {}, self.rng)
+
+        # optional external lambda provider: callable(symbol) -> lambda (ΔP/ΔQ)
+        self.lambda_provider = lambda_provider
+        # k_temp multiplier for temporary impact when using lambda
+        self.k_temp = float(slip_cfg.get('k_temp', 1.0))
+
         vd = self.cfg.get('venue_defaults') or {}
         self.maker_fee_bps = float(vd.get('maker_fee_bps', -1.0))
         self.taker_fee_bps = float(vd.get('taker_fee_bps', 4.0))
+
+        # runtime state
         self.orderbook = ob_model
-        self.open_orders: Dict[str, Order] = {}
-        self.fills: List[FillEvent] = []
+        self.open_orders = {}
+        self.fills = []
         # queue model: price -> list[(order_id, remaining_qty)] for LIMIT/POST_ONLY
-        self._queues: Dict[float, List[tuple]] = {}
+        self._queues = {}
 
     # --------------- Public API ---------------
     def submit_order(self, order: Order) -> List[FillEvent]:
@@ -187,14 +199,28 @@ class BrokerSim:
         if filled_qty <= 0:
             return []
         vwap = sum(p*q for p,q in consumed)/filled_qty
-        # price impact adjustment based on bar proxy: we approximate using total swept fractional of book
-        total_depth = sum(q for _,q in ladder)
-        depth_frac = filled_qty / max(1e-9, total_depth)
-        impact = self.impact_factor * depth_frac * (ladder[-1][0] - ladder[0][0]) if len(ladder)>=2 else 0.0
-        if order.side == 'BUY':
-            exec_px = vwap + impact
+        # price impact: prefer lambda-based temporary impact when provider present
+        impact = 0.0
+        if self.lambda_provider is not None:
+            try:
+                lam = float(self.lambda_provider(order.symbol) or 0.0)
+            except Exception:
+                lam = 0.0
+            # ΔP_temp = k_temp * λ * slice_volume
+            impact = self.k_temp * lam * filled_qty
+            if order.side == 'BUY':
+                exec_px = vwap + impact
+            else:
+                exec_px = vwap - impact
         else:
-            exec_px = vwap - impact
+            # fallback: price impact adjustment based on bar proxy: approximate using total swept fractional of book
+            total_depth = sum(q for _,q in ladder)
+            depth_frac = filled_qty / max(1e-9, total_depth)
+            impact = self.impact_factor * depth_frac * (ladder[-1][0] - ladder[0][0]) if len(ladder)>=2 else 0.0
+            if order.side == 'BUY':
+                exec_px = vwap + impact
+            else:
+                exec_px = vwap - impact
         # jitter
         jitter_bps = self.jitter_sampler.sample_bps()
         exec_px *= (1 + (jitter_bps/10_000.0) * (1 if order.side=='BUY' else -1))

@@ -27,6 +27,11 @@ from typing import Dict, Any, List, Tuple
 import math
 import statistics
 import time
+try:
+    # optional integration with onchain feature mapping
+    from ultra_signals.onchain.feature_map import map_snapshot_to_features
+except Exception:
+    map_snapshot_to_features = None
 
 _EPS = 1e-9
 
@@ -151,6 +156,21 @@ def compute_whale_features(symbol: str, now_ms: int, state: Dict[str, Any], cfg:
         # Count active groups
         active = sum(1 for k in ['exchange_flows','blocks','options','smart_money'] if state.get(k))
         out['sources_active'] = active
+        # Merge external onchain snapshot if present (new Sprint 57 collector)
+        try:
+            onchain = state.get('onchain_snapshot')
+            if onchain and map_snapshot_to_features:
+                mapped = map_snapshot_to_features(onchain)
+                # merge but keep existing keys (onchain augments)
+                for k, v in mapped.items():
+                    if k not in out:
+                        out[k] = v
+                    else:
+                        # prefer existing non-zero or existing value
+                        if (out.get(k) in (None, 0)) and v:
+                            out[k] = v
+        except Exception:
+            pass
     except Exception:
         return {}
     return out

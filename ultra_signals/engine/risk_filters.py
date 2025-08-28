@@ -10,6 +10,14 @@ from typing import Optional, Dict, Any, List
 from ultra_signals.engine.confluence import confluence_htf_agrees
 from ultra_signals.core.feature_store import FeatureStore
 from ultra_signals.core.custom_types import Signal
+import time
+from collections import defaultdict, deque
+
+# Sniper mode enforcement
+try:
+    from .sniper_counters import get_sniper_counters, reset_sniper_counters
+except ImportError:
+    get_sniper_counters = reset_sniper_counters = None
 
 # ========= SPRINT 9: SAFE IMPORTS (won't crash if modules missing) =========
 # We import new helpers defensively so your file doesn't break if a module
@@ -328,6 +336,70 @@ def apply_filters(signal: Signal, store: FeatureStore, settings: dict) -> Filter
     # If any of the reasons were triggered, veto the trade:
     if reasons:
         return FilterResult(False, reason=";".join(reasons), details=details)
+
+    # ----------------- 10. SNIPER MODE ENFORCEMENT -----------------
+    # Enforce runtime.sniper_mode caps (per-hour, daily) and optional MTF confirm requirement.
+    try:
+        rt = settings.get('runtime', {}) or {}
+        sniper = rt.get('sniper_mode') or {}
+        if sniper and sniper.get('enabled'):
+            # require MTF confirm if configured: earlier we append 'MTF_DISAGREE' to reasons when HTF fails
+            if sniper.get('mtf_confirm', False):
+                # If confluence check above already added MTF_DISAGREE we would have returned; but some callers only flag it in vote_detail.
+                # To be conservative, re-check HTF confluence explicitly here and block if disagree.
+                if not _htf_confluence_agrees(signal, store, settings):
+                    return FilterResult(False, reason='SNIPER_MTF_REQUIRED')
+
+            # Use Redis-backed counters if available, fallback to in-memory
+            max_per_hour = int(sniper.get('max_signals_per_hour') or 0)
+            daily_cap = int(sniper.get('daily_signal_cap') or 0)
+            
+            if (max_per_hour > 0 or daily_cap > 0) and get_sniper_counters:
+                counters = get_sniper_counters(settings)
+                block_reason = counters.check_and_increment(max_per_hour, daily_cap)
+                if block_reason:
+                    return FilterResult(False, reason=block_reason)
+            
+            # Legacy in-memory fallback if sniper_counters unavailable
+            elif max_per_hour > 0 or daily_cap > 0:
+                now = int(time.time())
+                
+                # Initialize simple module-level caches if missing (single deque per window)
+                if not hasattr(apply_filters, '_sniper_history'):
+                    apply_filters._sniper_history = {'hour': deque(), 'day': deque()}
+
+                def _clear_history():
+                    apply_filters._sniper_history = {'hour': deque(), 'day': deque()}
+                apply_filters._sniper_history_clear = _clear_history
+
+                hist = apply_filters._sniper_history
+                h_deque = hist['hour']
+                d_deque = hist['day']
+
+                # purge old timestamps outside windows
+                while h_deque and h_deque[0] < now - 3600:
+                    h_deque.popleft()
+                while d_deque and d_deque[0] < now - 86400:
+                    d_deque.popleft()
+
+                if max_per_hour > 0 and len(h_deque) >= max_per_hour:
+                    return FilterResult(False, reason='SNIPER_HOURLY_CAP')
+                if daily_cap > 0 and len(d_deque) >= daily_cap:
+                    return FilterResult(False, reason='SNIPER_DAILY_CAP')
+
+                # If allowed, record this planned signal timestamp so downstream concurrent checks will see it.
+                now_ts = int(time.time())
+                h_deque.append(now_ts)
+                d_deque.append(now_ts)
+                # Keep deques bounded (slightly larger than caps to avoid unbounded growth)
+                max_keep = max(max_per_hour * 2 if max_per_hour>0 else 100, 100)
+                while len(h_deque) > max_keep:
+                    h_deque.popleft()
+                while len(d_deque) > max_keep * 24:
+                    d_deque.popleft()
+    except Exception:
+        # Failure in sniper enforcement must not break main filter chain — default to allow
+        pass
 
     # ======================= SPRINT 40 SENTIMENT VETO =====================
     # Evaluate sentiment extreme veto only if earlier filters passed.

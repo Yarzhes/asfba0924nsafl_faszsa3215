@@ -1,0 +1,5 @@
+# Optional, heavier ML dependencies used by ensemble wrappers and experiments
+xgboost>=1.7.6
+lightgbm>=3.3.5
+torch>=2.2.0  # optional for PyTorch models
+catboost>=1.2.0  # optional

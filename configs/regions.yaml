@@ -1,0 +1,9 @@
+---
+# region -> venue mapping used by the low-latency router/placement config
+venues:
+  Binance:
+    region: ap-northeast-1
+    pod: binance-tokyo
+  Coinbase:
+    region: us-east-1
+    pod: coinbase-virginia

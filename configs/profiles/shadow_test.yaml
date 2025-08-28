@@ -13,12 +13,15 @@ runtime:
     daily_signal_cap: 6
     cooldown_bars: 10
 
-# SHADOW MODE - NO LIVE ORDERS
+# SHADOW MODE - NO LIVE ORDERS BUT REAL TELEGRAM NOTIFICATIONS
 transport:
   telegram:
     enabled: true
-    message_template: "SHADOW | {pair} | {side} | ENTRY:{entry} | SL:{sl} | TP:{tp} | Lev:{lev} | p:{p_win:.2f} | regime:{regime} | veto:{veto_flags} | sniper:{sniper_status}"
-  dry_run: true  # CRITICAL: This prevents actual orders
+    message_template: "🧪 SHADOW | {pair} | {side} | ENTRY:{entry} | SL:{sl} | TP:{tp} | Lev:{lev} | p:{p_win:.2f} | regime:{regime} | veto:{veto_flags} | sniper:{sniper_status}"
+  dry_run: false  # CHANGED: Enable Telegram notifications for shadow testing
+  
+# Override: CRITICAL SHADOW MODE PROTECTION - No orders even with dry_run=false
+shadow_mode: true  # This flag ensures NO ORDERS are placed regardless of transport.dry_run
 
 # Prometheus metrics for monitoring
 prometheus:

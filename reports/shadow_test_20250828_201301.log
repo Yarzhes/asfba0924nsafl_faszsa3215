@@ -1,0 +1,6 @@
+2025-08-28T20:13:01.771357 | SHADOW_START | {"mode": "shadow", "duration_minutes": 120, "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"], "sniper_config": {"max_signals_per_hour": 2, "daily_signal_cap": 6, "mtf_confirm": true}}
+2025-08-28T20:13:03.771952 | METRICS | {"sniper_rejections_hourly": 0, "sniper_rejections_daily": 0, "signals_allowed": 1, "latency_p95_ms": 45}
+2025-08-28T20:13:05.772480 | METRICS | {"sniper_rejections_hourly": 2, "sniper_rejections_daily": 1, "signals_allowed": 1, "latency_p95_ms": 50}
+2025-08-28T20:13:07.773170 | METRICS | {"sniper_rejections_hourly": 4, "sniper_rejections_daily": 2, "signals_allowed": 0, "latency_p95_ms": 55}
+2025-08-28T20:13:09.779578 | METRICS | {"sniper_rejections_hourly": 6, "sniper_rejections_daily": 3, "signals_allowed": 0, "latency_p95_ms": 60}
+2025-08-28T20:13:11.780440 | METRICS | {"sniper_rejections_hourly": 8, "sniper_rejections_daily": 4, "signals_allowed": 0, "latency_p95_ms": 65}

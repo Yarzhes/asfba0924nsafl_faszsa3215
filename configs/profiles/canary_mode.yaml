@@ -1,0 +1,58 @@
+# Canary Mode Configuration
+# Conservative settings for BTCUSDT-only live testing
+
+runtime:
+  symbols: ["BTCUSDT"]  # Single symbol for canary
+  timeframes: ["1m", "3m", "5m", "15m"]
+  primary_timeframe: "5m"
+  
+  sniper_mode:
+    enabled: true
+    mtf_confirm: true
+    max_signals_per_hour: 1  # Very conservative
+    daily_signal_cap: 2      # Maximum 2 trades per day
+    cooldown_bars: 10
+
+# CANARY MODE - LIVE ORDERS ENABLED (BTCUSDT ONLY)
+transport:
+  telegram:
+    enabled: true
+    message_template: "CANARY | {pair} | {side} | ENTRY:{entry} | SL:{sl} | TP:{tp} | Lev:{lev} | p:{p_win:.2f} | regime:{regime} | veto:{veto_flags} | sniper:{sniper_status}"
+  dry_run: false  # LIVE ORDERS ENABLED
+
+# Conservative sizing for canary
+sizing:
+  base_risk_pct: 0.005  # 0.5% risk (very small)
+  max_risk_pct: 0.01   # 1% maximum
+  min_notional: 25     # Minimum position size
+
+# All safety features enabled
+risk:
+  max_leverage: 5      # Conservative leverage cap
+  max_spread_pct: 0.04 # Tighter spread tolerance
+  
+# Enhanced vetoes for canary safety
+quality_gates:
+  enabled: true
+  veto:
+    max_spread_pct: 0.04
+    max_slippage_rr_drop: 0.15  # Stricter slippage control
+    daily_loss_limit_pct: 0.02  # 2% daily loss limit
+    max_consecutive_losses: 2    # Stop after 2 losses
+
+# Circuit breakers active
+brakes:
+  daily_loss_soft_limit_pct: 1.0  # 1% soft limit
+  daily_loss_hard_limit_pct: 2.0  # 2% hard limit
+  streak_cooldown_trades: 2        # Cooldown after 2 losses
+
+# Redis and monitoring (same as shadow)
+redis:
+  enabled: true
+  host: "localhost"
+  port: 6379
+  db: 0
+
+prometheus:
+  enabled: true
+  port: 8000

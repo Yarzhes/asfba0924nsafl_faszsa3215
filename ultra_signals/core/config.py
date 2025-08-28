@@ -42,12 +42,37 @@ class DataSourceSettings(BaseModel):
     api_key: Optional[str] = None
     api_secret: Optional[str] = None
 
+class RedisSettings(BaseModel):
+    """Redis configuration for distributed counters."""
+    enabled: bool = True
+    host: str = "localhost"
+    port: int = 6379
+    db: int = 0
+    password: Optional[str] = None
+    timeout: float = 5.0
+
+class PrometheusSettings(BaseModel):
+    """Prometheus metrics export configuration."""
+    enabled: bool = True
+    port: int = 8000
+    path: str = "/metrics"
+
+class SniperModeSettings(BaseModel):
+    """Sniper mode configuration for signal throttling and confirmation."""
+    enabled: bool = False
+    mtf_confirm: bool = True
+    min_confidence: float = Field(0.60, ge=0, le=1)
+    max_signals_per_hour: int = Field(2, gt=0)
+    daily_signal_cap: int = Field(6, gt=0)
+    cooldown_bars: int = Field(10, gt=0)
+
 class RuntimeSettings(BaseModel):
     """Core runtime settings for the application."""
     symbols: List[str] = Field(..., min_length=1)
     timeframes: List[str] = Field(..., min_length=1)
     primary_timeframe: str
     reconnect_backoff_ms: int = Field(gt=0)
+    sniper_mode: SniperModeSettings = SniperModeSettings()
 
     @field_validator('primary_timeframe')
     def primary_timeframe_must_be_in_timeframes(cls, v, values):
@@ -828,6 +853,8 @@ class CrossAssetSettings(BaseModel):
 class Settings(BaseModel):
     """The root Pydantic model for the entire configuration."""
     data_sources: Dict[str, DataSourceSettings]
+    redis: Optional[RedisSettings] = None
+    prometheus: Optional[PrometheusSettings] = None
     runtime: RuntimeSettings
     features: FeatureSettings
     derivatives: DerivativesSettings

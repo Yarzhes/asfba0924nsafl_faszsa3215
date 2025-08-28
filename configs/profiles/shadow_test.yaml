@@ -1,0 +1,41 @@
+# Shadow Mode Test Configuration
+# Run realtime with NO ORDERS (shadow mode) to validate sniper enforcement
+
+runtime:
+  symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]  # 3 symbols for focused testing
+  timeframes: ["1m", "3m", "5m", "15m"]       # MTF confirmation test
+  primary_timeframe: "5m"
+  
+  sniper_mode:
+    enabled: true
+    mtf_confirm: true
+    max_signals_per_hour: 2
+    daily_signal_cap: 6
+    cooldown_bars: 10
+
+# SHADOW MODE - NO LIVE ORDERS
+transport:
+  telegram:
+    enabled: true
+    message_template: "SHADOW | {pair} | {side} | ENTRY:{entry} | SL:{sl} | TP:{tp} | Lev:{lev} | p:{p_win:.2f} | regime:{regime} | veto:{veto_flags} | sniper:{sniper_status}"
+  dry_run: true  # CRITICAL: This prevents actual orders
+
+# Prometheus metrics for monitoring
+prometheus:
+  enabled: true
+  port: 8000
+
+# Redis for distributed counters (if available)
+redis:
+  enabled: true
+  host: "localhost"
+  port: 6379
+  db: 0
+
+# Enhanced logging for shadow test
+logging:
+  level: "INFO"
+
+# Minimal position sizing for shadow calculation
+sizing:
+  base_risk_pct: 0.010  # 1% risk for shadow calculations

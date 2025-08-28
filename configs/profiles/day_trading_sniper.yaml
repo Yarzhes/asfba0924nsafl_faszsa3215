@@ -655,8 +655,7 @@ portfolio_hedge:
     block_if_exceeds_beta_cap: true
     downscale_if_over_band: true
     downscale_factor: 0.5
-
-# Sprint 34 Adaptive Exits (dynamic ATR + structural anchors)
+\n+# Sprint 34 Adaptive Exits (dynamic ATR + structural anchors)
 risk:
   adaptive_exits:
     enabled: true

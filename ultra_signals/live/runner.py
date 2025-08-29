@@ -44,23 +44,24 @@ class LiveRunner:
         self.settings = settings
         live_cfg = getattr(settings, "live", None) or {}
         # Latency budgets
-        latency_cfg = getattr(live_cfg, "latency", {}) if hasattr(live_cfg, "latency") else {}
-        tick_cfg = latency_cfg.get("tick_to_decision_ms", {}) or {}
-        latency_budget_ms = int(tick_cfg.get("p99", 180))
-        queues_cfg = getattr(live_cfg, "queues", None) or {}
-        self.feed_q = asyncio.Queue(maxsize=int(queues_cfg.get("feed", 2000)))
-        self.engine_q = asyncio.Queue(maxsize=int(queues_cfg.get("engine", 256)))
-        self.order_q = asyncio.Queue(maxsize=int(queues_cfg.get("orders", 128)))
+        latency_cfg = getattr(live_cfg, "latency", None)
+        tick_cfg = getattr(latency_cfg, "tick_to_decision_ms", {}) if hasattr(latency_cfg, "tick_to_decision_ms") else {}
+        latency_budget_ms = int(getattr(tick_cfg, "p99", 180))
+        queues_cfg = getattr(live_cfg, "queues", None)
+        self.feed_q = asyncio.Queue(maxsize=int(getattr(queues_cfg, "feed", 2000)))
+        self.engine_q = asyncio.Queue(maxsize=int(getattr(queues_cfg, "engine", 256)))
+        self.order_q = asyncio.Queue(maxsize=int(getattr(queues_cfg, "orders", 128)))
         # Store path
         store_path = getattr(live_cfg, 'store_path', 'live_state.db') if live_cfg else 'live_state.db'
         self.store = StateStore(store_path)
-        cb_cfg = getattr(live_cfg, "circuit_breakers", None) or {}
+        cb_cfg = getattr(live_cfg, "circuit_breakers", None)
+        order_error_burst_cfg = getattr(cb_cfg, "order_error_burst", None) if cb_cfg else None
         self.safety = SafetyManager(
-            daily_loss_limit_pct=float(cb_cfg.get("daily_loss_limit_pct", 0.06)),
-            max_consecutive_losses=int(cb_cfg.get("max_consecutive_losses", 4)),
-            order_error_burst_count=int((cb_cfg.get("order_error_burst") or {}).get("count", 6)),
-            order_error_burst_window_sec=int((cb_cfg.get("order_error_burst") or {}).get("window_sec", 120)),
-            data_staleness_ms=int(cb_cfg.get("data_staleness_ms", 2500)),
+            daily_loss_limit_pct=float(getattr(cb_cfg, "daily_loss_limit_pct", 0.06)),
+            max_consecutive_losses=int(getattr(cb_cfg, "max_consecutive_losses", 4)),
+            order_error_burst_count=int(getattr(order_error_burst_cfg, "count", 6)),
+            order_error_burst_window_sec=int(getattr(order_error_burst_cfg, "window_sec", 120)),
+            data_staleness_ms=int(getattr(cb_cfg, "data_staleness_ms", 2500)),
         )
         self.metrics = Metrics()
         self.feed = FeedAdapter(settings, self.feed_q, venue_router=None)
@@ -270,6 +271,15 @@ class LiveRunner:
             logger.error(f"[LiveRunner] Clock check failed: {e}")
             self.safety.kill_switch("CLOCK")
         logger.info("[LiveRunner] Starting live pipeline (dry_run={})", self.settings.live.dry_run)
+        # Provide settings snapshot (dict) to engine for optional transports (e.g., Telegram) without tight coupling
+        try:
+            if hasattr(self.settings, 'model_dump'):
+                self.engine._settings = self.settings.model_dump()
+            else:
+                # fallback shallow dict via __dict__
+                self.engine._settings = dict(getattr(self.settings, '__dict__', {}))
+        except Exception:
+            self.engine._settings = None
         # JSON logging sink if requested
         try:
             if (self.settings.live.metrics.get("json_log", False) if self.settings.live else False):

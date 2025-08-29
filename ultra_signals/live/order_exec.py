@@ -39,6 +39,16 @@ class OrderExecutor:
         self.store = store
         self.rate_limits = rate_limits or {"orders_per_sec": 8, "cancels_per_sec": 8}
         self.retry_cfg = retry_cfg or {"max_attempts": 3, "base_delay_ms": 100}
+        # Allow pydantic model instance (e.g. LiveRetrySettings) to be passed; normalize to dict
+        try:  # pragma: no cover - defensive
+            if self.retry_cfg and not isinstance(self.retry_cfg, dict):
+                if hasattr(self.retry_cfg, 'model_dump'):
+                    self.retry_cfg = self.retry_cfg.model_dump()
+                else:
+                    # best-effort attribute extraction
+                    self.retry_cfg = {k: getattr(self.retry_cfg, k) for k in dir(self.retry_cfg) if not k.startswith('_') and isinstance(getattr(self.retry_cfg, k), (int, float))}
+        except Exception:
+            pass
         self.dry_run = dry_run
         self._recent_order_timestamps = []  # rate limit window
         self._running = False
@@ -69,7 +79,22 @@ class OrderExecutor:
                 break
             if plan is None:
                 continue
-            await self._process_plan(plan)
+            try:
+                await self._process_plan(plan)
+            except Exception as e:
+                # Defensive: prevent silent task death so queue doesn't pile up
+                try:
+                    from loguru import logger as _elogger
+                    _elogger.exception(f"[OrderExec] Unhandled exception processing plan symbol={plan.get('symbol')} side={plan.get('side')} err={e}")
+                except Exception:
+                    pass
+                # best-effort metrics increment for errors
+                try:
+                    if self.metrics:
+                        self.metrics.inc('orders_errors')
+                except Exception:
+                    pass
+                # continue loop to process next plan
 
     async def _process_plan(self, plan: Dict[str, Any]):
         client_id = make_client_order_id(plan)
@@ -97,8 +122,18 @@ class OrderExecutor:
             logger.warning("[OrderExec] Safety paused – suppressing order send")
             return
         attempts = 0
-        max_attempts = int(self.retry_cfg.get("max_attempts", 3))
-        base_delay = int(self.retry_cfg.get("base_delay_ms", 100)) / 1000.0
+        def _retry_cfg_get(key: str, default: Any):
+            try:
+                if isinstance(self.retry_cfg, dict):
+                    return self.retry_cfg.get(key, default)
+                if hasattr(self.retry_cfg, 'model_dump'):
+                    d = self.retry_cfg.model_dump()
+                    return d.get(key, default)
+                return getattr(self.retry_cfg, key, default)
+            except Exception:
+                return default
+        max_attempts = int(_retry_cfg_get("max_attempts", 3))
+        base_delay = int(_retry_cfg_get("base_delay_ms", 100)) / 1000.0
         while attempts < max_attempts:
             attempts += 1
             # rate limit

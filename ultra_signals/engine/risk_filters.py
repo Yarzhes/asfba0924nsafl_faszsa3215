@@ -108,35 +108,73 @@ def _htf_confluence_agrees(signal: Signal, store: FeatureStore, settings: dict) 
     return True
 
 
-def apply_filters(signal: Signal, store: FeatureStore, settings: dict) -> FilterResult:
+def apply_filters(signal: Signal, store: FeatureStore, settings: dict, metrics: Optional[Any] = None, *, record_candidate: bool = True) -> FilterResult:
     """
     Checks if a signal passes basic risk filters.
     - Must check: warmup bars and spread (bid/ask) availability.
     - `store` is FeatureStore, use its stored OHLCV and book ticker.
     - `settings` is a dict (pydantic model dumped by .model_dump()).
     """
+    # Metrics: every invocation counts as a candidate
+    if record_candidate:
+        try:
+            if metrics and hasattr(metrics, 'record_candidate'):
+                metrics.record_candidate()
+        except Exception:
+            pass
+
     # ----------------- 1. WARMUP CHECK -----------------
     warmup_periods = settings.get("features", {}).get("warmup_periods", 20)
     available_bars = store.get_warmup_status(signal.symbol, signal.timeframe)
     if available_bars < warmup_periods:
-        return FilterResult(False, reason="WARMUP_INCOMPLETE")
+        fr = FilterResult(False, reason="WARMUP_INCOMPLETE")
+        try:
+            if metrics and hasattr(metrics, 'record_block'):
+                metrics.record_block(fr.reason)
+        except Exception:
+            pass
+        return fr
 
     # ----------------- 2. BOOK TICKER VALIDATION -----------------
     book_ticker = store.get_book_ticker(signal.symbol)
     if not book_ticker:
-        return FilterResult(False, reason="MISSING_BOOK_TICKER")
+        fr = FilterResult(False, reason="MISSING_BOOK_TICKER")
+        try:
+            if metrics and hasattr(metrics, 'record_block'):
+                metrics.record_block(fr.reason)
+        except Exception:
+            pass
+        return fr
 
     # Ensure book_ticker is a tuple with at least 2 elements
     if not isinstance(book_ticker, tuple) or len(book_ticker) < 2:
-        return FilterResult(False, reason="INVALID_BOOK_TICKER")
+        fr = FilterResult(False, reason="INVALID_BOOK_TICKER")
+        try:
+            if metrics and hasattr(metrics, 'record_block'):
+                metrics.record_block(fr.reason)
+        except Exception:
+            pass
+        return fr
 
     bid, ask = book_ticker[:2]
     if bid <= 0 or ask <= 0:
-        return FilterResult(False, reason="INVALID_PRICE")
+        fr = FilterResult(False, reason="INVALID_PRICE")
+        try:
+            if metrics and hasattr(metrics, 'record_block'):
+                metrics.record_block(fr.reason)
+        except Exception:
+            pass
+        return fr
 
     mid_price = (ask + bid) / 2
     if mid_price == 0:
-        return FilterResult(False, reason="ZERO_MID_PRICE")
+        fr = FilterResult(False, reason="ZERO_MID_PRICE")
+        try:
+            if metrics and hasattr(metrics, 'record_block'):
+                metrics.record_block(fr.reason)
+        except Exception:
+            pass
+        return fr
 
     # ----------------- 3. SPREAD CALCULATION -----------------
     spread = ask - bid
@@ -156,11 +194,13 @@ def apply_filters(signal: Signal, store: FeatureStore, settings: dict) -> Filter
 
     # ----------------- 5. APPLY SPREAD % FILTER -----------------
     if spread_pct > max_spread_pct:
-        return FilterResult(
-            False,
-            reason="SPREAD_TOO_WIDE",
-            details={"spread": spread_pct, "max_allowed": max_spread_pct}
-        )
+        fr = FilterResult(False, reason="SPREAD_TOO_WIDE", details={"spread": spread_pct, "max_allowed": max_spread_pct})
+        try:
+            if metrics and hasattr(metrics, 'record_block'):
+                metrics.record_block(fr.reason)
+        except Exception:
+            pass
+        return fr
 
     # =================================================================
     # ============= SPRINT 8 ADDITIONS (OPTIONAL, NON-BREAKING) ========
@@ -335,7 +375,13 @@ def apply_filters(signal: Signal, store: FeatureStore, settings: dict) -> Filter
 
     # If any of the reasons were triggered, veto the trade:
     if reasons:
-        return FilterResult(False, reason=";".join(reasons), details=details)
+        fr = FilterResult(False, reason=";".join(reasons), details=details)
+        try:
+            if metrics and hasattr(metrics, 'record_block'):
+                metrics.record_block(fr.reason)
+        except Exception:
+            pass
+        return fr
 
     # ----------------- 10. SNIPER MODE ENFORCEMENT -----------------
     # Enforce runtime.sniper_mode caps (per-hour, daily) and optional MTF confirm requirement.
@@ -348,7 +394,13 @@ def apply_filters(signal: Signal, store: FeatureStore, settings: dict) -> Filter
                 # If confluence check above already added MTF_DISAGREE we would have returned; but some callers only flag it in vote_detail.
                 # To be conservative, re-check HTF confluence explicitly here and block if disagree.
                 if not _htf_confluence_agrees(signal, store, settings):
-                    return FilterResult(False, reason='SNIPER_MTF_REQUIRED')
+                    fr = FilterResult(False, reason='SNIPER_MTF_REQUIRED')
+                    try:
+                        if metrics and hasattr(metrics, 'record_block'):
+                            metrics.record_block(fr.reason)
+                    except Exception:
+                        pass
+                    return fr
 
             # Use Redis-backed counters if available, fallback to in-memory
             max_per_hour = int(sniper.get('max_signals_per_hour') or 0)
@@ -358,7 +410,13 @@ def apply_filters(signal: Signal, store: FeatureStore, settings: dict) -> Filter
                 counters = get_sniper_counters(settings)
                 block_reason = counters.check_and_increment(max_per_hour, daily_cap)
                 if block_reason:
-                    return FilterResult(False, reason=block_reason)
+                    fr = FilterResult(False, reason=block_reason)
+                    try:
+                        if metrics and hasattr(metrics, 'record_block'):
+                            metrics.record_block(fr.reason)
+                    except Exception:
+                        pass
+                    return fr
             
             # Legacy in-memory fallback if sniper_counters unavailable
             elif max_per_hour > 0 or daily_cap > 0:
@@ -383,9 +441,21 @@ def apply_filters(signal: Signal, store: FeatureStore, settings: dict) -> Filter
                     d_deque.popleft()
 
                 if max_per_hour > 0 and len(h_deque) >= max_per_hour:
-                    return FilterResult(False, reason='SNIPER_HOURLY_CAP')
+                    fr = FilterResult(False, reason='SNIPER_HOURLY_CAP')
+                    try:
+                        if metrics and hasattr(metrics, 'record_block'):
+                            metrics.record_block(fr.reason)
+                    except Exception:
+                        pass
+                    return fr
                 if daily_cap > 0 and len(d_deque) >= daily_cap:
-                    return FilterResult(False, reason='SNIPER_DAILY_CAP')
+                    fr = FilterResult(False, reason='SNIPER_DAILY_CAP')
+                    try:
+                        if metrics and hasattr(metrics, 'record_block'):
+                            metrics.record_block(fr.reason)
+                    except Exception:
+                        pass
+                    return fr
 
                 # If allowed, record this planned signal timestamp so downstream concurrent checks will see it.
                 now_ts = int(time.time())
@@ -422,9 +492,66 @@ def apply_filters(signal: Signal, store: FeatureStore, settings: dict) -> Filter
                     pass
                 veto_reason = _sent_engine.maybe_veto(signal.symbol)
                 if veto_reason:
-                    return FilterResult(False, reason=veto_reason, details=details)
+                    fr = FilterResult(False, reason=veto_reason, details=details)
+                    try:
+                        if metrics and hasattr(metrics, 'record_block'):
+                            metrics.record_block(fr.reason)
+                    except Exception:
+                        pass
+                    return fr
     except Exception:
         pass  # sentiment failures must not break core filter path
 
     # ----------------- 7. PASSED -----------------
+    # =============== META-SCORER / EXPECTANCY GATING (optional) ==================
+    try:
+        ms_cfg = settings.get('meta_scorer') if isinstance(settings.get('meta_scorer'), dict) else None
+        if ms_cfg:
+            # Expect the caller to attach calibrated probability & expectancy to signal (if available)
+            p_win = getattr(signal, 'confidence', None)
+            entropy = getattr(signal, 'entropy', None)
+            exp_R = None
+            try:
+                vd = signal.vote_detail or {}
+                exp_R = vd.get('expected_R')
+            except Exception:
+                exp_R = None
+            p_min_global = float(ms_cfg.get('p_win_min', 0.0))
+            entropy_max = float(ms_cfg.get('entropy_max', 1.0))
+            min_exp_R = float(ms_cfg.get('min_expected_R', 0.0))
+            # Regime-specific override
+            try:
+                regime_over = ms_cfg.get('p_win_min_by_regime', {}) or {}
+                regime_label = None
+                if isinstance(signal.vote_detail, dict):
+                    rg = signal.vote_detail.get('regime') or {}
+                    if isinstance(rg, dict):
+                        regime_label = rg.get('regime_label') or rg.get('label')
+                if regime_label and regime_label in regime_over:
+                    p_min_global = float(regime_over.get(regime_label, p_min_global))
+            except Exception:
+                pass
+            meta_reasons = []
+            if p_win is not None and p_win < p_min_global:
+                meta_reasons.append('META_PWIN_LOW')
+            if entropy is not None and entropy > entropy_max:
+                meta_reasons.append('META_ENTROPY_HIGH')
+            if exp_R is not None and exp_R < min_exp_R:
+                meta_reasons.append('META_EXPECTED_R_LOW')
+            if meta_reasons:
+                fr = FilterResult(False, reason=';'.join(meta_reasons))
+                try:
+                    if metrics and hasattr(metrics, 'record_block'):
+                        metrics.record_block(fr.reason)
+                except Exception:
+                    pass
+                return fr
+    except Exception:
+        pass
+
+    try:
+        if metrics and hasattr(metrics, 'record_allowed'):
+            metrics.record_allowed()
+    except Exception:
+        pass
     return FilterResult(True)

@@ -8,6 +8,7 @@ This is a highly simplified version for initial Sprint 21 scaffolding. It:
 from __future__ import annotations
 import asyncio
 import time
+import os
 from typing import Dict, Any, Optional
 from loguru import logger
 from ultra_signals.core.events import KlineEvent, MarketEvent, BookTickerEvent
@@ -31,6 +32,22 @@ try:
     from ultra_signals.dq.venue_merge import composite_mid as _dq_composite_mid
 except Exception:  # pragma: no cover
     _dq_composite_mid = None  # type: ignore
+try:  # Telegram transport (optional)
+    from ultra_signals.core.custom_types import EnsembleDecision, SubSignal  # type: ignore
+    from ultra_signals.transport.telegram import send_decision  # type: ignore
+except Exception:  # pragma: no cover
+    EnsembleDecision = None  # type: ignore
+    SubSignal = None  # type: ignore
+    send_decision = None  # type: ignore
+try:  # Minimal strategy components (lightweight placeholder)
+    from ultra_signals.core.feature_store import FeatureStore  # type: ignore
+    from ultra_signals.engine.risk_filters import apply_filters  # type: ignore
+    from ultra_signals.core.custom_types import Signal as LegacySignal, SignalType, SubSignal, EnsembleDecision  # type: ignore
+except Exception:  # pragma: no cover
+    FeatureStore = None  # type: ignore
+    apply_filters = None  # type: ignore
+    LegacySignal = None  # type: ignore
+    SignalType = None  # type: ignore
 
 
 class EngineWorker:
@@ -62,11 +79,82 @@ class EngineWorker:
         self._flip_flag_until = 0.0
         self._cascade_flag_until = 0.0
         self._last_direction_changes = []  # list[(mono_ts, direction)] where direction in {+1,-1}
+        # Main event loop
         while self._running:
             try:
                 evt: MarketEvent = await self.in_queue.get()
             except asyncio.CancelledError:
                 break
+            # Fast forced-signal path on BookTicker when canary override enabled (allows rapid wiring test without waiting for bar close)
+            if isinstance(evt, BookTickerEvent):
+                force_signals_bt = (
+                    os.getenv('CANARY_FORCE_SIGNALS') == '1' or
+                    ((self._settings or {}).get('runtime', {}) or {}).get('canary_force_signals') is True
+                )
+                if force_signals_bt:
+                    now_m = time.perf_counter()
+                    if not hasattr(self, '_last_forced_emit'):
+                        self._last_forced_emit = {}
+                    last_emit = self._last_forced_emit.get(evt.symbol, 0)
+                    if (now_m - last_emit) >= 2.0:  # emit at most every 2s per symbol
+                        side = 'LONG' if ((getattr(self, '_canary_flip_state', 0) % 2) == 0) else 'SHORT'
+                        self._canary_flip_state = getattr(self, '_canary_flip_state', 0) + 1
+                        plan = {
+                            'ts': int(time.time()),
+                            'symbol': evt.symbol,
+                            'timeframe': 'TICK',
+                            'side': side,
+                            'price': evt.best_ask or evt.best_bid,
+                            'size': 1.0,
+                            'qty': 1.0,
+                            'version': 1,
+                            '_decision_monotonic': time.perf_counter(),
+                            'exec_plan': {'order_type': 'MARKET', 'post_only': False},
+                        }
+                        try:
+                            self.out_queue.put_nowait(plan)
+                            logger.debug(f"[EngineWorker][FORCE-BT] emitted tick plan side={side} sym={evt.symbol}")
+                        except asyncio.QueueFull:
+                            logger.error('[EngineWorker] order queue full; dropping forced tick plan')
+                        self._last_forced_emit[evt.symbol] = now_m
+                        # Emit synthetic EnsembleDecision for Telegram (canary wiring)
+                        try:
+                            if side in ('LONG','SHORT') and EnsembleDecision and SubSignal and send_decision:
+                                # Resolve telegram settings (dict with 'telegram' key expected by transport)
+                                tcfg = None
+                                sref = getattr(self, '_settings', None)
+                                if isinstance(sref, dict) and 'transport' in sref:
+                                    # full settings dict already attached
+                                    tcfg = (sref.get('transport') or {})
+                                elif self.feed_ref and hasattr(self.feed_ref, '_settings'):
+                                    frs = getattr(self.feed_ref, '_settings')
+                                    try:
+                                        if hasattr(frs, 'transport') and hasattr(frs.transport, 'telegram'):
+                                            tcfg = {'telegram': frs.transport.telegram.model_dump() if hasattr(frs.transport.telegram,'model_dump') else dict(getattr(frs.transport,'telegram',{}))}
+                                    except Exception:
+                                        pass
+                                if tcfg and 'telegram' in tcfg:
+                                    # Build minimal decision object
+                                    sub = SubSignal(ts=plan['ts'], symbol=plan['symbol'], tf=plan['timeframe'], strategy_id='canary_forced', direction=side, confidence_calibrated=0.60, reasons={})
+                                    # Derive simplistic pseudo entry/SL/TP for display (spread around current price)
+                                    px = float(plan.get('price') or 0.0) or 1.0
+                                    rr_tp_mult = 1.004 if side=='LONG' else 0.996
+                                    rr_sl_mult = 0.996 if side=='LONG' else 1.004
+                                    entry = px
+                                    tp = px * rr_tp_mult
+                                    sl = px * rr_sl_mult
+                                    rr = abs((tp-entry)/(entry-sl)) if (entry-sl)!=0 else 1.0
+                                    dec = EnsembleDecision(
+                                        ts=plan['ts'], symbol=plan['symbol'], tf=plan['timeframe'], decision=side, confidence=0.60,
+                                        subsignals=[sub],
+                                        vote_detail={'agree':1,'total':1,'profile':'canary','weighted_sum':1.0,
+                                                     'pre_trade':{'p_win':0.55,'regime':'canary','veto_count':0,'lat_ms':{'p50':10.0,'p90':15.0}},
+                                                     'entry':entry,'sl':sl,'tp':tp,'lev':1.0,'risk_pct':0.02,'rr':rr},
+                                        vetoes=[])
+                                    # fire and forget
+                                    asyncio.create_task(send_decision(dec, {'telegram': tcfg.get('telegram')}))
+                        except Exception:
+                            pass
             if isinstance(evt, BookTickerEvent):
                 # cache best bid/ask plus sizes (if provided)
                 setattr(self, "_last_bidask", (evt.symbol, evt.best_bid, evt.best_ask))
@@ -172,8 +260,64 @@ class EngineWorker:
                 # Force artificial delay if requested (test hook)
                 if self.extra_delay_ms:
                     await asyncio.sleep(self.extra_delay_ms / 1000.0)
-                # placeholder compute – future integration with real engine
-                await asyncio.sleep(0)  # yield to loop
+                # --- BASIC STRATEGY & SIGNAL PIPELINE (minimal viable) ---
+                await asyncio.sleep(0)  # cooperative yield
+                # --- Minimal strategy placeholder -> build naive signals ---
+                strategy_signals = []
+                try:
+                    if LegacySignal and SignalType:
+                        side_hint = 'LONG' if evt.close >= evt.open else 'SHORT'
+                        sig = LegacySignal(symbol=evt.symbol, timeframe=evt.timeframe, decision=side_hint, signal_type=SignalType.TREND_FOLLOWING, price=evt.close, confidence=0.55)
+                        strategy_signals.append(sig)
+                except Exception:
+                    pass
+                # Apply risk filters
+                filtered_signals = []
+                for sig in strategy_signals:
+                    if self.metrics and hasattr(self.metrics, 'record_candidate'):
+                        try:
+                            self.metrics.record_candidate()
+                        except Exception:
+                            pass
+                    store_ref = None
+                    try:
+                        store_ref = getattr(self.feed_ref, 'feature_store', None) or getattr(self.feed_ref, 'store', None) or getattr(self, 'feature_store', None)
+                    except Exception:
+                        store_ref = None
+                    if apply_filters and store_ref is not None:
+                        try:
+                            fr = apply_filters(sig, store_ref, self._settings or {}, self.metrics, record_candidate=False)  # type: ignore
+                            if not fr.passed:
+                                if self.metrics and hasattr(self.metrics, 'record_block'):
+                                    try:
+                                        self.metrics.record_block(fr.reason or 'BLOCK')
+                                    except Exception:
+                                        pass
+                                continue
+                        except Exception:
+                            # treat as block if filters explode
+                            if self.metrics and hasattr(self.metrics, 'record_block'):
+                                try:
+                                    self.metrics.record_block('FILTER_ERR')
+                                except Exception:
+                                    pass
+                            continue
+                    elif apply_filters and store_ref is None:
+                        if self.metrics and hasattr(self.metrics, 'record_block'):
+                            try:
+                                self.metrics.record_block('NO_STORE')
+                            except Exception:
+                                pass
+                        continue
+                    if self.metrics and hasattr(self.metrics, 'record_allowed'):
+                        try:
+                            self.metrics.record_allowed()
+                        except Exception:
+                            pass
+                    filtered_signals.append(sig)
+                # Use first allowed signal to drive side
+                if filtered_signals:
+                    side = filtered_signals[0].decision
                 ingest = getattr(evt, "_ingest_monotonic", None)
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
                 if ingest is not None and self.metrics:
@@ -184,21 +328,7 @@ class EngineWorker:
                 if self.safety and self.safety.state.paused:
                     logger.warning("[EngineWorker] Safety paused – skipping plan emission")
                     continue
-                # Composite mid (if multi-venue snapshots available on feed_ref)
-                try:
-                    feed_ref = getattr(self, 'feed_ref', None)
-                    if feed_ref and hasattr(feed_ref, '_venue_books') and len(feed_ref._venue_books) >= 2 and _dq_composite_mid:  # type: ignore
-                        venues_data = {}
-                        for vid, snap in feed_ref._venue_books.items():
-                            venues_data[vid] = __import__('pandas').DataFrame([{'ts': snap.get('ts'), 'bid': snap.get('bid'), 'ask': snap.get('ask')}])
-                        comp_df, flags = _dq_composite_mid(venues_data, getattr(self,'_settings',{}) or {})
-                        if not comp_df.empty:
-                            plan.setdefault('composite', {})['mid'] = float(comp_df['mid'].iloc[-1])
-                            plan['composite']['spread_bps'] = float(comp_df['venue_spread_bps'].iloc[-1])
-                            plan['composite']['flags'] = flags
-                except Exception:
-                    pass
-                # Spread guardrail
+                # Spread guardrail & plan construction
                 bidask = getattr(self, "_last_bidask", None)
                 if bidask and bidask[0] == evt.symbol:
                     _, bid, ask = bidask
@@ -208,16 +338,28 @@ class EngineWorker:
                         if spread_pct > max_spread_pct:
                             logger.warning(f"[EngineWorker] Spread {spread_pct:.3f}% > {max_spread_pct}% – abstain")
                             continue
-                # Placeholder: in future incorporate real decision engine. For now always FLAT.
-                side = "FLAT"  # placeholder; future: integrate RealSignalEngine output
+                # Placeholder: in future incorporate real decision engine.
+                # Canary override: allow forcing alternating LONG/SHORT decisions to test end-to-end wiring.
+                side = "FLAT" if not filtered_signals else filtered_signals[0].decision  # default fallback
+                force_signals = (
+                    os.getenv('CANARY_FORCE_SIGNALS') == '1' or
+                    ((self._settings or {}).get('runtime', {}) or {}).get('canary_force_signals') is True
+                )
+                if force_signals and not filtered_signals:
+                    # simple deterministic flip-flop so tests are reproducible
+                    flip = getattr(self, '_canary_flip_state', 0)
+                    side = 'LONG' if flip % 2 == 0 else 'SHORT'
+                    self._canary_flip_state = flip + 1
                 plan = {
-                        "ts": evt.timestamp,
-                        "symbol": evt.symbol,
-                        "timeframe": evt.timeframe,
-                        "side": side,
-                        "price": evt.close,
-                        "version": 1,
-                        "_decision_monotonic": time.perf_counter(),
+                    "ts": evt.timestamp,
+                    "symbol": evt.symbol,
+                    "timeframe": evt.timeframe,
+                    "side": side,
+                    "price": evt.close,
+                    # Provide a deterministic tiny notional/size so executor can simulate fills
+                    "size": 1.0,
+                    "version": 1,
+                    "_decision_monotonic": time.perf_counter(),
                 }
                 if getattr(self.safety, 'size_downscale', None):
                     plan['size_mult'] = getattr(self.safety, 'size_downscale')
@@ -253,17 +395,49 @@ class EngineWorker:
                                 plan.setdefault('exec_plan', {}).update(fr.order)
                     except Exception:
                         pass
-                    # Microstructure veto flags (skip emission if unstable)
-                    active_flags = []
-                    now_m = time.perf_counter()
-                    if now_m < self._spoof_flag_until: active_flags.append('SPOOF_LIQ_VANISH')
-                    if now_m < self._flip_flag_until: active_flags.append('BOOK_FLIP_UNSTABLE')
-                    if now_m < self._cascade_flag_until: active_flags.append('CASCADE_UNSTABLE')
-                    if active_flags:
-                        logger.warning(f"[EngineWorker] Microstructure veto {active_flags} – suppress order plan")
-                        continue
-                    if active_flags:
-                        plan.setdefault('microstructure', {}).update({'flags': active_flags})
+                    # Microstructure veto flags (skip emission if unstable) unless disabled for canary
+                    disable_micro_veto = (
+                        os.getenv('CANARY_DISABLE_MICRO_VETO') == '1' or
+                        ((self._settings or {}).get('runtime', {}) or {}).get('disable_microstructure_veto') is True
+                    )
+                    if not disable_micro_veto:
+                        active_flags = []
+                        now_m = time.perf_counter()
+                        if now_m < self._spoof_flag_until: active_flags.append('SPOOF_LIQ_VANISH')
+                        if now_m < self._flip_flag_until: active_flags.append('BOOK_FLIP_UNSTABLE')
+                        if now_m < self._cascade_flag_until: active_flags.append('CASCADE_UNSTABLE')
+                        if active_flags:
+                            logger.warning(f"[EngineWorker] Microstructure veto {active_flags} – suppress order plan")
+                            continue
+                        if active_flags:
+                            plan.setdefault('microstructure', {}).update({'flags': active_flags})
+                    # Ensure a minimal exec_plan so downstream order path triggers in canary mode
+                    if 'exec_plan' not in plan:
+                        plan['exec_plan'] = {'order_type': 'MARKET', 'post_only': False}
+                    # Ensure qty alias for any downstream paths expecting qty instead of size
+                    if 'qty' not in plan:
+                        plan['qty'] = plan.get('size', 1.0)
+                # Composite mid (if multi-venue snapshots available on feed_ref) placed after plan creation
+                try:
+                    feed_ref = getattr(self, 'feed_ref', None)
+                    if feed_ref and hasattr(feed_ref, '_venue_books') and len(getattr(feed_ref, '_venue_books')) >= 2 and _dq_composite_mid:  # type: ignore
+                        venues_data = {}
+                        for vid, snap in feed_ref._venue_books.items():
+                            try:
+                                venues_data[vid] = __import__('pandas').DataFrame([{'ts': snap.get('ts'), 'bid': snap.get('bid'), 'ask': snap.get('ask')}])
+                            except Exception:
+                                pass
+                        if venues_data:
+                            comp_df, flags = _dq_composite_mid(venues_data, getattr(self,'_settings',{}) or {})
+                            if hasattr(comp_df, 'empty') and not comp_df.empty:
+                                plan.setdefault('composite', {})['mid'] = float(comp_df['mid'].iloc[-1])
+                                try:
+                                    plan['composite']['spread_bps'] = float(comp_df['venue_spread_bps'].iloc[-1])
+                                except Exception:
+                                    pass
+                                plan['composite']['flags'] = flags
+                except Exception:
+                    pass
                 # Latency enrich: quote freshness & book spread
                 try:
                     bidask = getattr(self,'_last_bidask', None)
@@ -409,7 +583,43 @@ class EngineWorker:
                     except Exception:
                         # if anything goes wrong, fall back to emitting the original plan
                         pass
-                    self.out_queue.put_nowait(plan)
+                    try:
+                        self.out_queue.put_nowait(plan)
+                        if force_signals:
+                            logger.debug(f"[EngineWorker][FORCE-KLINE] emitted bar plan side={side} sym={evt.symbol}")
+                    except asyncio.QueueFull:
+                        logger.error("[EngineWorker] order queue full; dropping plan")
+                    # Emit synthetic EnsembleDecision for Telegram (canary wiring) on bar-close forced signals
+                    try:
+                        if force_signals and side in ('LONG','SHORT') and EnsembleDecision and SubSignal and send_decision:
+                            tcfg = None
+                            sref = getattr(self, '_settings', None)
+                            if isinstance(sref, dict) and 'transport' in sref:
+                                tcfg = (sref.get('transport') or {})
+                            elif self.feed_ref and hasattr(self.feed_ref, '_settings'):
+                                frs = getattr(self.feed_ref, '_settings')
+                                try:
+                                    if hasattr(frs, 'transport') and hasattr(frs.transport, 'telegram'):
+                                        tcfg = {'telegram': frs.transport.telegram.model_dump() if hasattr(frs.transport.telegram,'model_dump') else dict(getattr(frs.transport,'telegram',{}))}
+                                except Exception:
+                                    pass
+                            if tcfg and 'telegram' in tcfg:
+                                sub = SubSignal(ts=plan['ts'], symbol=plan['symbol'], tf=plan['timeframe'], strategy_id='canary_forced', direction=side, confidence_calibrated=0.60, reasons={})
+                                px = float(plan.get('price') or 0.0) or 1.0
+                                rr_tp_mult = 1.004 if side=='LONG' else 0.996
+                                rr_sl_mult = 0.996 if side=='LONG' else 1.004
+                                entry = px; tp = px * rr_tp_mult; sl = px * rr_sl_mult
+                                rr = abs((tp-entry)/(entry-sl)) if (entry-sl)!=0 else 1.0
+                                dec = EnsembleDecision(
+                                    ts=plan['ts'], symbol=plan['symbol'], tf=plan['timeframe'], decision=side, confidence=0.60,
+                                    subsignals=[sub],
+                                    vote_detail={'agree':1,'total':1,'profile':'canary','weighted_sum':1.0,
+                                                 'pre_trade':{'p_win':0.55,'regime':'canary','veto_count':0,'lat_ms':{'p50':10.0,'p90':15.0}},
+                                                 'entry':entry,'sl':sl,'tp':tp,'lev':1.0,'risk_pct':0.02,'rr':rr},
+                                    vetoes=[])
+                                asyncio.create_task(send_decision(dec, {'telegram': tcfg.get('telegram')}))
+                    except Exception:
+                        pass
                 except asyncio.QueueFull:
                     logger.error("[EngineWorker] order queue full; dropping plan")
 

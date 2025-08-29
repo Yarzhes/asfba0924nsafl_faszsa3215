@@ -4,7 +4,25 @@ import argparse
 import asyncio
 from loguru import logger
 from ultra_signals.core.config import load_settings
+import os
 from ultra_signals.live.runner import LiveRunner
+
+
+def _inject_api_env_aliases():
+    """Support simple BINANCE_API_KEY / SECRET env vars by mapping them to the
+    structured override names expected by load_settings (no secrets are written to disk).
+
+    We intentionally do NOT log the values. Only create the ULTRA_SIGNALS_* vars
+    if they aren't already explicitly provided to avoid clobbering user overrides.
+    """
+    simple_key = os.getenv("BINANCE_API_KEY")
+    simple_secret = os.getenv("BINANCE_API_SECRET")
+    target_key_var = "ULTRA_SIGNALS_DATA_SOURCES__BINANCE_USDM__API_KEY"
+    target_secret_var = "ULTRA_SIGNALS_DATA_SOURCES__BINANCE_USDM__API_SECRET"
+    if simple_key and not os.getenv(target_key_var):
+        os.environ[target_key_var] = simple_key
+    if simple_secret and not os.getenv(target_secret_var):
+        os.environ[target_secret_var] = simple_secret
 
 
 def parse_args():
@@ -20,6 +38,15 @@ def parse_args():
 
 async def _amain():
     args = parse_args()
+    # Allow optional .env usage without forcing dependency elsewhere
+    try:  # no hard dependency; fine if missing
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv()
+    except Exception:
+        pass
+
+    _inject_api_env_aliases()
+
     settings = load_settings(args.config)
     lr = LiveRunner(settings, dry_run=args.dry_run or getattr(settings.live, 'dry_run', True))
     if args.pause:

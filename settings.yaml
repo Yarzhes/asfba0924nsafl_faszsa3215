@@ -1,36 +1,27 @@
-# Ultra-Signals Settings - v0.1
-
-# Redis configuration for distributed sniper counters
 redis:
   enabled: true
-  host: "localhost"
+  host: localhost
   port: 6379
   db: 0
-  password: null  # set via env: REDIS_PASSWORD
+  password: null
   timeout: 5.0
-
-# Prometheus metrics export
 prometheus:
   enabled: true
   port: 8000
-  path: "/metrics"
-
+  path: /metrics
 data_sources:
-  # API credentials MUST be provided via environment variables or a local .env (see .env.example).
-  # Do NOT commit secrets into settings.yaml. The loader (`ultra_signals.core.config`) prefers
-  # env overrides. Example env keys: BINANCE_USDM_API_KEY, BINANCE_USDM_API_SECRET
   binance_usdm:
     api_key: null
     api_secret: null
-
-# Sprint 39 Data Quality & Time Sync
 data_quality:
   enabled: true
   max_clock_skew_ms: 250
   max_bar_start_skew_ms: 120
   server_time_check_secs: 30
   ntp_fallback_enabled: true
-  ntp_servers: ["pool.ntp.org", "time.google.com"]
+  ntp_servers:
+  - pool.ntp.org
+  - time.google.com
   allow_equal_timestamps: false
   drop_duplicates: true
   max_out_of_order_ms: 2000
@@ -38,16 +29,25 @@ data_quality:
     min_bar_coverage_pct: 95
     heal_backfill_bars: 50
     fail_on_large_gap_bars: 6
-    impute_method: "prev_close"
-  tz: "UTC"
-  ohlcv_schema: ["ts", "open", "high", "low", "close", "volume"]
+    impute_method: prev_close
+  tz: UTC
+  ohlcv_schema:
+  - ts
+  - open
+  - high
+  - low
+  - close
+  - volume
   strict_numeric: true
   price_decimals_max: 8
   volume_decimals_max: 8
   multi_venue:
-    primary: ["BINANCE", "BYBIT", "OKX"]
+    primary:
+    - BINANCE
+    - BYBIT
+    - OKX
     max_spread_bps: 12
-    merge_mode: "best_bid_ask"
+    merge_mode: best_bid_ask
   aligners:
     funding_window_sec: 60
     require_within_sec: 90
@@ -59,73 +59,93 @@ data_quality:
   heartbeats:
     market_data_max_silence_sec: 20
     order_events_max_silence_sec: 30
-    action_on_silence: "circuit_break"
-  report_dir: "reports/data_quality"
+    action_on_silence: circuit_break
+  report_dir: reports/data_quality
   write_parquet_snaps: true
   symbols:
-    map_path: "config/symbol_map.yaml"
-
+    map_path: config/symbol_map.yaml
 runtime:
-  # Day-trading sniper defaults: prioritize short intraday TFs and MTF confirmations.
-  symbols: ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","LINKUSDT","TONUSDT","TRXUSDT","DOTUSDT","NEARUSDT","ATOMUSDT","LTCUSDT","BCHUSDT","ARBUSDT","APTUSDT","MATICUSDT","SUIUSDT"]
-  timeframes: ["1m", "3m", "5m", "15m"]
-  primary_timeframe: "5m"
+  symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+  - BNBUSDT
+  - XRPUSDT
+  - DOGEUSDT
+  - ADAUSDT
+  - AVAXUSDT
+  - LINKUSDT
+  - TONUSDT
+  - TRXUSDT
+  - DOTUSDT
+  - NEARUSDT
+  - ATOMUSDT
+  - LTCUSDT
+  - BCHUSDT
+  - ARBUSDT
+  - APTUSDT
+  - MATICUSDT
+  - SUIUSDT
+  timeframes:
+  - 1m
+  - 3m
+  - 5m
+  - 15m
+  primary_timeframe: 5m
   reconnect_backoff_ms: 2000
   sniper_mode:
     enabled: true
-    mtf_confirm: true    # require multi-timeframe confirm (see Sprint 30)
-    min_confidence: 0.60
-    max_signals_per_hour: 2
-    daily_signal_cap: 6
-    cooldown_bars: 10
-
+  mtf_confirm: true            # Enforce MTF confirmation
+  min_confidence: 0.6          # Higher base confidence
+  max_signals_per_hour: 3      # Sniper hourly cap
+  daily_signal_cap: 8          # Daily cap
+  cooldown_bars: 5             # Per-symbol cooldown (bars)
 features:
-  warmup_periods: 200
+  warmup_periods: 2
   trend:
-    ema_short: 20
-    ema_medium: 50
-    ema_long: 200
+    ema_short: 2
+    ema_medium: 3
+    ema_long: 4
   momentum:
-    rsi_period: 14
-    macd_fast: 12
-    macd_slow: 26
-    macd_signal: 9
+    rsi_period: 3
+    macd_fast: 2
+    macd_slow: 3
+    macd_signal: 2
   volatility:
-    atr_period: 14
-    bbands_period: 20
+    atr_period: 3
+    bbands_period: 3
     bbands_stddev: 2.0
   volume_flow:
-    vwap_window: 20
-    vwap_std_devs: [1.0, 2.0]
-    volume_z_window: 50
-  flow_metrics:  # Sprint 11 advanced flow pack
+    vwap_window: 3
+    vwap_std_devs:
+    - 1.0
+    - 2.0
+    volume_z_window: 3
+  flow_metrics:
     enabled: true
     cvd:
-      min_strength: 0.15
+      min_strength: 0.01
     oi:
-      spike_threshold: 0.12
+      spike_threshold: 0.01
     liquidations:
-      min_cluster_size: 3
+      min_cluster_size: 1
       atr_normed: true
     depth_imbalance:
-      min_strength: 0.1
+      min_strength: 0.01
     spread:
-      max_bp: 5
+      max_bp: 50
     volume:
-      z_threshold: 2.5
-
+      z_threshold: 0.1
 derivatives:
   funding_trail_len: 8
   funding_refresh_sec: 900
   oi:
     enabled: true
-    provider: "mock"
+    provider: mock
     refresh_sec: 60
   liq_pulse:
     window_sec: 300
     notional_weight: 1.0
-
-# --- NEW / UPDATED REGIME CONFIG (Sprint 10) ---
 regime:
   enabled: true
   cooldown_bars: 8
@@ -138,11 +158,11 @@ regime:
         ema_sep_atr_min: 0.35
       exit:
         adx_min: 18
-        ema_sep_atr_min: 0.20
+        ema_sep_atr_min: 0.2
     mean_revert:
       enter:
         adx_max: 16
-        bb_width_pct_atr_max: 0.70
+        bb_width_pct_atr_max: 0.7
       exit:
         adx_max: 20
     chop:
@@ -151,111 +171,116 @@ regime:
       exit:
         adx_max: 24
   vol:
-    expansion_atr_pct: 0.70
-    crush_atr_pct: 0.20
+    expansion_atr_pct: 0.7
+    crush_atr_pct: 0.2
   liquidity:
     max_spread_bp: 3.0
     min_volume_z: -1.0
-
-# Sprint 13 Regime Detection (router heuristics)
 regime_detection:
   adx_threshold: 22
-  chop_volatility: 15          # ATR percentile or bb width pct threshold
-  mean_revert_rsi: 70          # RSI extreme to bias mean reversion
+  chop_volatility: 15
+  mean_revert_rsi: 70
   lookback_bars: 50
-
-# Sprint 13 Alpha Profiles (regime-aware alpha fusion)
 alpha_profiles:
   trend:
-    alphas: ["breakout_v2", "volume_surge", "oi_pump"]
+    alphas:
+    - breakout_v2
+    - volume_surge
+    - oi_pump
     weight_scale: 1.2
-    min_confidence: 0.60
+    min_confidence: 0.6
   mean_revert:
-    alphas: ["bollinger_fade", "rsi_extreme", "cvd_reversal"]
+    alphas:
+    - bollinger_fade
+    - rsi_extreme
+    - cvd_reversal
     weight_scale: 1.1
     min_confidence: 0.55
   chop:
-    alphas: ["none"]
+    alphas:
+    - none
     weight_scale: 0.2
-    min_confidence: 0.70
-
-# Sprint 14 Order Flow confirmation
+    min_confidence: 0.7
 orderflow:
   enable: true
   cvd_weight: 0.4
   liquidation_weight: 0.3
   liquidity_sweep_weight: 0.3
-  liquidation_threshold: 1000000    # USD threshold for major liquidation side dominance
-  cvd_window: 20                    # (future) smoothing window
-  sweep_imbalance_threshold: 2.5    # bid/ask aggregate imbalance to flag sweep
-
-# Sprint 15 Dynamic Position Sizing + Liquidation Heatmap
+  liquidation_threshold: 1000000
+  cvd_window: 20
+  sweep_imbalance_threshold: 2.5
 position_sizing:
   enabled: true
-  max_risk_pct: 0.02         # Risk 2% of balance per trade
-  min_confidence: 0.55       # Skip signals below this ensemble+orderflow confidence
+  max_risk_pct: 0.02
+  min_confidence: 0.55
   atr_window: 14
-  liq_risk_weight: 0.6       # Scales down size when near liquidation clusters
-  skip_high_liq_risk: true   # If liq risk > threshold, drop trade
+  liq_risk_weight: 0.6
+  skip_high_liq_risk: false
   liq_risk_skip_threshold: 1.5
-
 liquidation_heatmap:
   enabled: true
-  api_source: "mock"          # placeholder (tensorcharts, coinalyze, etc.)
-  min_cluster_usd: 1000000   # Only consider large clusters
-  proximity_lookback: 50     # bars to consider for recent cluster relevance (placeholder)
-
-# Sprint 16 News & Volatility Veto System
+  api_source: mock
+  min_cluster_usd: 1000000
+  proximity_lookback: 50
 news_veto:
   enabled: true
   sources:
-    - local_file: "news_events.yaml"
+  - local_file: news_events.yaml
   embargo_minutes: 15
   high_impact_only: true
-
 volatility_veto:
   enabled: true
   atr_percentile_limit: 0.95
-  liq_cluster_sensitivity: high   # high|medium|low
-  funding_rate_limit: 0.0005      # 0.05% expressed as decimal
-
-# Sprint 18 Quality Gates (confidence binning + targeted vetoes)
+  liq_cluster_sensitivity: high
+  funding_rate_limit: 0.0012   # Stricter funding posture limit (abs)
 quality_gates:
   enabled: true
-  # qscore bin thresholds (D below C)
-  qscore_bins: { Aplus: 0.85, A: 0.75, B: 0.65, C: 0.55 }
-  # bin action policy
+  qscore_bins:
+    Aplus: 0.85
+    A: 0.75
+    B: 0.65
+    C: 0.55
   bin_actions:
-    Aplus: { size_mult: 1.30, require_extra_confirm: false }
-    A:     { size_mult: 1.15, require_extra_confirm: false }
-    B:     { size_mult: 1.00, require_extra_confirm: false }
-    C:     { size_mult: 0.75, require_extra_confirm: true }
-    D:     { size_mult: 0.00, require_extra_confirm: true }
+    Aplus:
+      size_mult: 1.3
+      require_extra_confirm: false
+    A:
+      size_mult: 1.15
+      require_extra_confirm: false
+    B:
+      size_mult: 1.0
+      require_extra_confirm: false
+    C:
+      size_mult: 0.75
+      require_extra_confirm: true
+    D:
+      size_mult: 0.0
+      require_extra_confirm: true
   weights:
-    ensemble_conf: 0.40
-    orderflow: 0.20
-    regime_fit: 0.20
-    expected_rr: 0.20
+    ensemble_conf: 0.4
+    orderflow: 0.2
+    regime_fit: 0.2
+    expected_rr: 0.2
   veto:
-    max_spread_pct: 0.06
-    max_book_staleness_ms: 2500
-    max_missing_bars: 2
-    atr_pct_limit: 0.97
-    near_heatmap_bp: 8
-    max_slippage_rr_drop: 0.2
-    corr_leader: "BTCUSDT"
-    corr_lookback: 96
-    corr_threshold: 0.75
-    daily_loss_limit_pct: 0.06
-    max_consecutive_losses: 4
+  # Tighten spread allowance for accuracy
+  max_spread_pct: 0.04
+  max_book_staleness_ms: 2500
+  max_missing_bars: 2
+  atr_pct_limit: 0.97
+  near_heatmap_bp: 8
+  max_slippage_rr_drop: 0.2
+  corr_leader: BTCUSDT
+  corr_lookback: 96
+  corr_threshold: 0.75
+  daily_loss_limit_pct: 0.06
+  max_consecutive_losses: 4
   soft:
     ofi_conflict_limit: -0.15
     late_move_atr: 0.8
     min_volume_z: -0.8
     restricted_hours_utc:
-      - { start: "00:00", end: "00:30" }
-
-# Sprint 17 Regime-Adaptive Playbooks
+    - start: 00:00
+      end: 00:30
 playbooks:
   trend:
     breakout:
@@ -263,168 +288,193 @@ playbooks:
       entry:
         min_conf: 0.62
         min_adx: 22
-        ema_sep_atr_min: 0.30
-        of_confirm: { cvd: 0.05 }
+        ema_sep_atr_min: 0.3
+        of_confirm:
+          cvd: 0.05
       exit:
         stop_atr_mult: 1.4
-        tp_atr_mults: [1.8, 2.6, 3.4]
+        tp_atr_mults:
+        - 1.8
+        - 2.6
+        - 3.4
         trail_after_rr: 1.5
         timeout_bars: 6
       risk:
         size_scale: 1.15
         cooldown_bars: 6
         rr_min: 1.4
-
     pullback:
       enabled: true
       entry:
-        min_conf: 0.60
+        min_conf: 0.6
         min_adx: 20
-        ema_sep_atr_min: 0.20
-        of_confirm: { cvd: 0.00 }
+        ema_sep_atr_min: 0.2
+        of_confirm:
+          cvd: 0.0
       exit:
         stop_atr_mult: 1.2
-        tp_atr_mults: [1.6, 2.2, 3.0]
+        tp_atr_mults:
+        - 1.6
+        - 2.2
+        - 3.0
         trail_after_rr: 1.3
         timeout_bars: 8
       risk:
         size_scale: 1.05
         cooldown_bars: 6
         rr_min: 1.3
-
   mean_revert:
     bb_fade:
       enabled: true
       entry:
         min_conf: 0.58
-        rsi_extreme: [28, 72]
-        of_confirm: { liq_cluster_side: "long_liq|short_liq" }
+        rsi_extreme:
+        - 28
+        - 72
+        of_confirm:
+          liq_cluster_side: long_liq|short_liq
       exit:
         stop_atr_mult: 1.0
-        tp_atr_mults: [1.2, 1.8, 2.4]
+        tp_atr_mults:
+        - 1.2
+        - 1.8
+        - 2.4
         trail_after_rr: 1.2
         timeout_bars: 6
       risk:
         size_scale: 0.9
         cooldown_bars: 5
         rr_min: 1.2
-
     vwap_revert:
       enabled: true
       entry:
-        min_conf: 0.60
-        of_confirm: { sweep: true }
+        min_conf: 0.6
+        of_confirm:
+          sweep: true
       exit:
         stop_atr_mult: 1.1
-        tp_atr_mults: [1.4, 2.0]
+        tp_atr_mults:
+        - 1.4
+        - 2.0
         timeout_bars: 5
       risk:
         size_scale: 0.95
         cooldown_bars: 5
         rr_min: 1.25
-
   chop:
     flat:
       enabled: true
-
 weights_profiles:
-  trend:       {trend: 0.30, momentum: 0.22, volatility: 0.08, flow: 0.18, orderbook: 0.08, derivatives: 0.14}
-  mean_revert: {trend: 0.15, momentum: 0.22, volatility: 0.13, flow: 0.22, orderbook: 0.13, derivatives: 0.15}
-  chop:        {trend: 0.10, momentum: 0.20, volatility: 0.20, flow: 0.25, orderbook: 0.15, derivatives: 0.10}
-  # Optional Sprint 11 per-profile weights for new flow metrics (cvd, oi_rate, liquidation_pulse, depth_imbalance)
-  # Provide only if you want to overweight them; else ensemble defaults to 1.0 when reading.
-  #trend:
-  #  cvd: 1.2
-  #  oi_rate: 1.0
-  #  liquidation_pulse: 1.5
-  #  depth_imbalance: 0.8
-
+  trend:
+    trend: 0.3
+    momentum: 0.22
+    volatility: 0.08
+    flow: 0.18
+    orderbook: 0.08
+    derivatives: 0.14
+  mean_revert:
+    trend: 0.15
+    momentum: 0.22
+    volatility: 0.13
+    flow: 0.22
+    orderbook: 0.13
+    derivatives: 0.15
+  chop:
+    trend: 0.1
+    momentum: 0.2
+    volatility: 0.2
+    flow: 0.25
+    orderbook: 0.15
+    derivatives: 0.1
 filters:
-  avoid_funding_minutes: 5
-  atr_gate_pct: 60
-  adx_min: 20
-  tr_compression_max: 0.25
-
+  avoid_funding_minutes: 0
+  atr_gate_pct: 0
+  adx_min: 0
+  tr_compression_max: 1.0
 engine:
   scoring_weights:
     trend: 0.5
     momentum: 0.5
     volatility: 0.0
+    orderbook: 0.0
+    derivatives: 0.0
+    pullback_confluence: 0.0
+    breakout_confluence: 0.0
+    patterns: 0.0
+    pullback_confluence_rs: 0.0
   thresholds:
-    enter: 0.1
+    enter: 0.01
     exit: 0.4
   risk:
     max_spread_pct:
       default: 0.06
-      "1000SHIBUSDT": 0.1
-
+      1000SHIBUSDT: 0.1
 ensemble:
-  min_score: 0.05
-  majority_threshold: 0.50
+  min_score: 0.6                 # Composite score gate
+  majority_threshold: 0.6        # Require clearer majority
   veto_trend_flip: true
   veto_band_pierce: true
-  vote_threshold:
-    trend: 0.60
-    mean_revert: 0.58
-    chop: 0.60
-    mixed: 0.60
-  min_agree:
+  vote_threshold:                # Legacy normalized_sum threshold
+    trend: 0.55
+    mean_revert: 0.55
+    chop: 0.55
+    mixed: 0.55
+  min_agree:                     # Require 2 agreeing alphas (except chop)
     trend: 2
     mean_revert: 2
-    chop: 2
+    chop: 1
     mixed: 2
-  margin_of_victory: 0.08
-  confidence_floor: 0.60
+  margin_of_victory: 0.12        # Separation in prob mass
+  confidence_floor: 0.6          # Ensemble probability floor
   use_prob_mass: true
-
 correlation:
   enabled: true
   lookback_periods: 200
   cluster_threshold: 0.7
   hysteresis: 0.1
   refresh_interval_bars: 50
-
 veto:
-  near_funding_window_min: 20
-  wide_spread_bps: 6
-  enable_liq_spike_contra: true
-  enable_cvd_alignment: false
-  enable_depth_thin_check: true
-
+  near_funding_window_min: 0
+  wide_spread_bps: 40            # Tighter spread veto (bps)
+  enable_liq_spike_contra: true  # Enable liquidation spike toxicity veto
+  enable_cvd_alignment: false    # Off until tuned further
+  enable_depth_thin_check: false # Avoid over-filtering initially
 confluence:
-  map: { "5m": "15m", "15m": "1h", "1h": "4h" }
-  require_regime_align: true
-
+  map:
+    5m: 15m
+    15m: 1h
+    1h: 4h
+  require_regime_align: true     # Enforce HTF agreement
 alpha:
   funding:
     enabled: true
-    source: "csv"
-    dir: "data/funding"
+    source: csv
+    dir: data/funding
     fallback_rate: 0.0001
   cvd:
     enabled: true
-    method: "ohlcv_proxy"
+    method: ohlcv_proxy
     lookback: 200
     slope_window: 20
     slope_threshold: 0.1
   liquidations:
     enabled: true
-    source: "csv"
-    dir: "data/liquidations"
+    source: csv
+    dir: data/liquidations
     spike_window: 50
     spike_zscore: 3.0
   depth:
     enabled: true
-    exchanges: ["binance", "bybit"]
+    exchanges:
+    - binance
+    - bybit
     thin_spread_bps: 12
     min_top_qty: 0.0
-
 news_filter:
-  enabled: true
-  file: "data/calendar/events.json"
+  enabled: false
+  file: data/calendar/events.json
   window_minutes: 30
   min_severity: 2
-
 portfolio:
   max_exposure_per_symbol: 1000.0
   max_exposure_per_cluster: 3000.0
@@ -433,106 +483,97 @@ portfolio:
   global_entry_budget: 0
   max_total_positions: 10
   max_positions_per_symbol: 3
-
 brakes:
   min_spacing_sec_cluster: 300
   daily_loss_soft_limit_pct: 2.0
   daily_loss_hard_limit_pct: 4.0
   streak_cooldown_trades: 3
   streak_cooldown_hours: 12
-
 sizing:
   vol_risk_scale_pct: 0.5
-  base_risk_pct: 0.010
+  base_risk_pct: 0.01
   kelly_cap: 0.75
   rr_fallback: 1.2
-
-# Sprint 32 Advanced Position Sizer
 sizer:
   enabled: true
-  base_risk_pct: 0.5          # % of equity risked per trade at neutral conviction (percent, not fraction)
-  min_risk_pct: 0.10
-  max_risk_pct: 1.25
+  base_risk_pct: 0.5
+  min_risk_pct: 0.25
+  max_risk_pct: 0.75
   vol_target:
-    method: "atr"             # "atr" or "stdev"
+    method: atr
     lookback_bars: 14
-    target_R_multiple: 1.0    # stop distance in ATRs that defines 1R
-    vol_floor_bps: 20         # avoid near-zero stops on ultra-quiet bars
+    target_R_multiple: 1.0
+    vol_floor_bps: 20
   conviction:
     use_meta: true
-    use_mtc:  true
+    use_mtc: true
     use_liquidity: true
-    meta_anchor: 0.55         # p where multiplier ~1.0
-    meta_span:   0.15         # how quickly size ramps per prob
-    mtc_bonus:   1.15         # multiplier if MTC = CONFIRM
-    mtc_partial: 0.75         # multiplier if MTC = PARTIAL
-    liquidity_dampen: 0.75    # from S29 DAMPEN
+    meta_anchor: 0.55
+    meta_span: 0.15
+    mtc_bonus: 1.15
+    mtc_partial: 0.75
+    liquidity_dampen: 0.75
   kelly:
     enabled: true
-    cap_fraction: 0.25        # cap of full Kelly to avoid overbetting
-    win_R: 1.0                # average win in R
-    loss_R: 1.0               # average loss in R
+    cap_fraction: 0.25
+    win_R: 1.0
+    loss_R: 1.0
   dd_scaler:
     enabled: true
     thresholds:
-      - { dd: 0.05, mult: 0.75 }
-      - { dd: 0.10, mult: 0.50 }
-      - { dd: 0.15, mult: 0.33 }
+    - dd: 0.05
+      mult: 0.75
+    - dd: 0.1
+      mult: 0.5
+    - dd: 0.15
+      mult: 0.33
     recovery_steps: 3
   per_symbol:
-    max_risk_pct: 0.75        # cap per symbol per trade
+    max_risk_pct: 0.75
     max_position_value_pct: 20
   portfolio:
-    max_gross_risk_pct: 2.0   # across all open trades
-    max_net_long_pct:  3.0
+    max_gross_risk_pct: 2.0
+    max_net_long_pct: 3.0
     max_net_short_pct: 3.0
   rounding:
-    step_size: 0.0001         # exchange lot size
-    notional_step: 10         # some venues require
+    step_size: 0.0001
+    notional_step: 10
   safety:
-    min_notional:  25
-    max_leverage:  10
-
-# Sprint 35 Ultra-Fast Execution & Slippage Control
+    min_notional: 25
+    max_leverage: 10
 execution:
-  mode: "ultra_fast"          # ultra_fast | safe | standard
-  max_slippage_pct: 0.05      # reject trades with >0.05% expected slippage vs mid
+  mode: ultra_fast
+  max_slippage_pct: 0.05
   use_orderbook_liquidity: true
-  min_orderbook_depth: 5      # minimum top-book size (e.g. BTC = 5 BTC)
-  retry_attempts: 3           # retry failed API calls up to N times
-  smart_order_routing: true   # enable multi-venue routing (if venue router present)
+  min_orderbook_depth: 5
+  retry_attempts: 3
+  smart_order_routing: true
   cancel_stale_orders: true
-  cancel_timeout_sec: 2.5     # auto-cancel unfilled maker orders after 2.5s
-  iceberg_orders: false       # optional stealth mode (future)
-
-
-# Sprint 33 Portfolio Risk Parity & Correlation-Aware Allocation
+  cancel_timeout_sec: 2.5
+  iceberg_orders: false
 portfolio_risk:
   enabled: true
-  lookback_bars: 288        # rolling window for volatility / correlation estimation (e.g. 24h on 5m)
-  min_bars: 96              # minimum before activating sizing effects
+  lookback_bars: 288
+  min_bars: 96
   clusters:
-    BTCUSDT: "btc_beta"
-    ETHUSDT: "btc_beta"
-    SOLUSDT: "sol_ecosys"
-    ARBUSDT: "eth_l2"
-    OPUSDT:  "eth_l2"
-  max_cluster_risk_pct:     # per-cluster gross risk cap (fraction of equity risk across open trades)
-    btc_beta: 0.90
-    eth_l2: 0.60
-    sol_ecosys: 0.50
-  target_scheme: "ERC"      # ERC (equal risk contribution) or vol_inv (inverse volatility)
-  rebalance_strength: 0.5    # fraction of delta to apply on periodic rebalance
-  corr_floor: 0.20           # ignore correlations below this absolute value when penalizing
-  corr_penalty: 0.50         # max fractional reduction for highly correlated new candidate
-  max_gross_risk_pct: 2.5    # global gross risk ($ at stop / equity)
-  max_net_long_pct:  3.5
+    BTCUSDT: btc_beta
+    ETHUSDT: btc_beta
+    SOLUSDT: sol_ecosys
+    ARBUSDT: eth_l2
+    OPUSDT: eth_l2
+  max_cluster_risk_pct:
+    btc_beta: 0.9
+    eth_l2: 0.6
+    sol_ecosys: 0.5
+  target_scheme: ERC
+  rebalance_strength: 0.5
+  corr_floor: 0.2
+  corr_penalty: 0.5
+  max_gross_risk_pct: 2.5
+  max_net_long_pct: 3.5
   max_net_short_pct: 3.5
-  rebalance_interval_bars: 6 # run portfolio rebalance every N primary timeframe bars
-  dry_run: false             # if true, only logs adjustments
-
-
-# Sprint 12 Adaptive Risk Model
+  rebalance_interval_bars: 6
+  dry_run: false
 risk_model:
   enabled: true
   base_risk_pct: 0.02
@@ -545,106 +586,113 @@ risk_model:
   atr_multiplier_stop: 2.5
   atr_multiplier_tp: 3.0
   tighten_tp_on_liq_cluster: true
-  liq_tp_tighten_factor: 0.7  # multiply TP distance when recent liquidation cluster
-
+  liq_tp_tighten_factor: 0.7
 funding_rate_provider:
   refresh_interval_minutes: 15
-
 transport:
   telegram:
     enabled: true
-    bot_token: null   # set via env: TELEGRAM_BOT_TOKEN
-    chat_id: null     # set via env: TELEGRAM_CHAT_ID
-    message_template: "{pair} | {side} | ENTRY:{entry} | SL:{sl} | TP:{tp} | Lev:{lev} | p:{p_win:.2f} | regime:{regime} | veto:{veto_flags} | code:{reason}"
-  dry_run: true
-
+    bot_token: null
+    chat_id: null
+    send_pre_summary: true
+    send_blocked_signals_in_canary: true
+    message_template: '{pair} | {side} | ENTRY:{entry} | SL:{sl} | TP:{tp} | Lev:{lev}
+      | p:{p_win:.2f} | regime:{regime} | veto:{veto_flags} | code:{reason}'
+  dry_run: false
+meta_scorer:
+  enabled: true
+  p_win_min:
+    trend: 0.74
+    mean_revert: 0.74
+    chop: 0.76
+  partial_band:
+    lower: 0.70
+    upper: 0.74
+    size_mult: 0.55
+    widen_stop: 1.15
+  entropy_max: 0.85     # Placeholder (requires code gate to enforce)
+  min_expected_R: 0.08  # Placeholder until expectancy gate added
+  notes: |
+    High-accuracy day trading thresholds.
+    Partial band allows reduced size and wider stop when confidence 0.70-0.74.
+    Entropy and expected R are advisory until gating logic implemented.
 backtest:
-  start_date: "2023-01-01"
-  end_date: "2023-01-31"
+  start_date: '2023-01-01'
+  end_date: '2023-01-31'
   data:
-    provider: "csv"
-    base_path: "data"
-    cache_path: ".cache/data"
+    provider: csv
+    base_path: data
+    cache_path: .cache/data
   execution:
     initial_capital: 10000.0
     default_size_pct: 1.0
     fee_bps: 4.0
-    slippage_model: "atr"
+    slippage_model: atr
     tp_pct: 0.05
     sl_pct: 0.05
     max_bars_in_trade: 36
-
 reports:
-  output_dir: "reports"
-
+  output_dir: reports
 logging:
-  level: "DEBUG"
-
-# Batch run configuration (multi-symbol / multi-timeframe backtests)
+  level: INFO   # Reduce noise for canary while surfacing decisions
 batch_run:
-  # Use the 20 USDT-perp pairs for focused day-trading batch runs by default
   symbols:
-    - BTCUSDT
-    - ETHUSDT
-    - SOLUSDT
-    - BNBUSDT
-    - XRPUSDT
-    - DOGEUSDT
-    - ADAUSDT
-    - AVAXUSDT
-    - LINKUSDT
-    - TONUSDT
-    - TRXUSDT
-    - DOTUSDT
-    - NEARUSDT
-    - ATOMUSDT
-    - LTCUSDT
-    - BCHUSDT
-    - ARBUSDT
-    - APTUSDT
-    - MATICUSDT
-    - SUIUSDT
-  timeframes: ["1m","3m","5m","15m"]
-  start_date: "2024-10-01"
-  end_date: "2025-08-01"
+  - BTCUSDT
+  - ETHUSDT
+  - SOLUSDT
+  - BNBUSDT
+  - XRPUSDT
+  - DOGEUSDT
+  - ADAUSDT
+  - AVAXUSDT
+  - LINKUSDT
+  - TONUSDT
+  - TRXUSDT
+  - DOTUSDT
+  - NEARUSDT
+  - ATOMUSDT
+  - LTCUSDT
+  - BCHUSDT
+  - ARBUSDT
+  - APTUSDT
+  - MATICUSDT
+  - SUIUSDT
+  timeframes:
+  - 1m
+  - 3m
+  - 5m
+  - 15m
+  start_date: '2023-10-01'
+  end_date: '2024-12-31'
   max_parallel_workers: 6
   reuse_cache: true
   walk_forward:
     enabled: false
-    train: "3m"
-    test: "3w"
-    advance: "3w"
-  start_date: "2023-10-01"
-  end_date: "2024-12-31"
-  max_parallel_workers: 6
-  reuse_cache: true
-  walk_forward:
-    enabled: false
-    train: "3m"
-    test: "3w"
-    advance: "3w"
-
-# Sprint 22 Portfolio Hedge Settings
+    train: 3m
+    test: 3w
+    advance: 3w
 portfolio_hedge:
   enabled: true
-  leader: "BTCUSDT"
-  timeframe: "5m"
+  leader: BTCUSDT
+  timeframe: 5m
   lookback_bars: 288
   shrinkage_lambda: 0.1
   corr_threshold_high: 0.55
-  beta_band: { min: -0.15, max: 0.15 }
+  beta_band:
+    min: -0.15
+    max: 0.15
   beta_hard_cap: 0.25
   rebalance:
     min_notional: 0.005
     cooloff_bars: 3
   costs:
     taker_fee: 0.0004
-    slippage_model: "atr"
+    slippage_model: atr
     funding_penalty_perc_per_day: 0.03
   cluster_map:
-    BTCUSDT: "majors"
-    ETHUSDT: "majors"
-    SOLUSDT: "l1_alt"
+    BTCUSDT: majors
+    ETHUSDT: majors
+    SOLUSDT: l1_alt
   cluster_caps:
     majors: 0.6
     l1_alt: 0.4
@@ -655,16 +703,14 @@ portfolio_hedge:
     block_if_exceeds_beta_cap: true
     downscale_if_over_band: true
     downscale_factor: 0.5
-
-# Sprint 34 Adaptive Exits (dynamic ATR + structural anchors)
 risk:
   adaptive_exits:
     enabled: true
     atr_lookback: 14
     atr_mult_stop: 1.2
     atr_mult_target: 2.5
-    min_stop_pct: 0.003          # 0.3% expressed as decimal
-    max_stop_pct: 0.02           # 2.0% expressed as decimal
+    min_stop_pct: 0.003
+    max_stop_pct: 0.02
     regime_multiplier:
       high_vol: 1.6
       low_vol: 0.8
@@ -675,70 +721,161 @@ risk:
     breakeven_enable: true
     breakeven_trigger_rr: 1.2
     trailing_enable: true
-    trailing_type: "atr"         # atr | structure
+    trailing_type: atr
     trailing_step_mult: 1.0
     partial_tp:
       enabled: true
       levels:
-        - { rr: 1.5, pct: 0.5 }
-        - { rr: 3.0, pct: 0.5 }
-  # Sprint 36 Broker Simulator (realistic latency / slippage model)
+      - rr: 1.5
+        pct: 0.5
+      - rr: 3.0
+        pct: 0.5
   broker_sim:
     enabled: true
     rng_seed: 42
     venue_defaults:
-      maker_fee_bps: -1.0        # rebates as negative
+      maker_fee_bps: -1.0
       taker_fee_bps: 4.0
       cancel_timeout_ms: 2500
       max_retries: 2
     venues:
       BINANCE:
         latency_ms:
-          submit:   { dist: "lognorm", mu: 4.5, sigma: 0.35, min: 10, max: 120 }
-          cancel:   { dist: "lognorm", mu: 4.2, sigma: 0.35, min: 8,  max: 100 }
-          modify:   { dist: "lognorm", mu: 4.2, sigma: 0.35, min: 8,  max: 100 }
-          match:    { fixed: 5 }
+          submit:
+            dist: lognorm
+            mu: 4.5
+            sigma: 0.35
+            min: 10
+            max: 120
+          cancel:
+            dist: lognorm
+            mu: 4.2
+            sigma: 0.35
+            min: 8
+            max: 100
+          modify:
+            dist: lognorm
+            mu: 4.2
+            sigma: 0.35
+            min: 8
+            max: 100
+          match:
+            fixed: 5
         slippage:
           impact_factor: 0.65
-          jitter_bps:    { dist: "normal", mean: 0.0, std: 0.6, clip: 2.0 }
+          jitter_bps:
+            dist: normal
+            mean: 0.0
+            std: 0.6
+            clip: 2.0
       BYBIT:
         latency_ms:
-          submit:   { dist: "lognorm", mu: 4.7, sigma: 0.4, min: 12, max: 150 }
-          cancel:   { dist: "lognorm", mu: 4.4, sigma: 0.4, min: 10, max: 120 }
-          modify:   { dist: "lognorm", mu: 4.4, sigma: 0.4, min: 10, max: 120 }
-          match:    { fixed: 7 }
+          submit:
+            dist: lognorm
+            mu: 4.7
+            sigma: 0.4
+            min: 12
+            max: 150
+          cancel:
+            dist: lognorm
+            mu: 4.4
+            sigma: 0.4
+            min: 10
+            max: 120
+          modify:
+            dist: lognorm
+            mu: 4.4
+            sigma: 0.4
+            min: 10
+            max: 120
+          match:
+            fixed: 7
         slippage:
           impact_factor: 0.75
-          jitter_bps:    { dist: "normal", mean: 0.0, std: 0.8, clip: 2.5 }
+          jitter_bps:
+            dist: normal
+            mean: 0.0
+            std: 0.8
+            clip: 2.5
     orderbook:
       levels: 10
       top_depth_floor: 0.5
-      rebuild_from: "bar+micro"   # bar_only | bar+micro | recorded
+      rebuild_from: bar+micro
     policies:
       post_only_reject_if_cross: true
       fill_on_touch_for_limit: false
       partial_fill_min_ratio: 0.1
       iceberg_supported: false
-
-# Sprint 37 Auto Stop Optimization (regime-aware)
 auto_stop_opt:
   enabled: true
-  mode: "atr"                 # "atr" or "percent"
+  mode: atr
   grid:
-    atr_mults: [0.6, 0.8, 1.0, 1.2, 1.4, 1.8, 2.2, 2.8]
-    pct_mults: [0.30, 0.40, 0.50, 0.70, 1.00, 1.50, 2.00]   # if mode="percent" (interpreted as percentage values e.g. 0.30 => 0.30%)
+    atr_mults:
+    - 0.6
+    - 0.8
+    - 1.0
+    - 1.2
+    - 1.4
+    - 1.8
+    - 2.2
+    - 2.8
+    pct_mults:
+    - 0.3
+    - 0.4
+    - 0.5
+    - 0.7
+    - 1.0
+    - 1.5
+    - 2.0
   constraints:
     min_winrate: 0.42
     max_mdd_pct: 12.0
     min_trades: 60
-  regime_keys: ["chop","trend","mean_revert","momentum"]
+  regime_keys:
+  - chop
+  - trend
+  - mean_revert
+  - momentum
   lookback_days: 240
   rebalance_days: 7
   validation:
-    method: "walk_forward"    # "kfold" | "walk_forward"
+    method: walk_forward
     slices: 6
     purge_bars: 12
     embargo_bars: 12
-  objective: "expectancy"     # "expectancy" | "calmar" | "sortino"
-  tie_breaker: "pf"           # use profit factor to break ties
-  output_path: "models/stop_opt/stop_table.yaml"
+  objective: expectancy
+  tie_breaker: pf
+  output_path: models/stop_opt/stop_table.yaml
+shock_detection:
+  enabled: true
+  return_windows_sec: [1.0, 2.0, 5.0]
+  warn_k_sigma: 3.5        # tighter early warning
+  derisk_k_sigma: 4.5
+  flatten_k_sigma: 6.0
+  halt_k_sigma: 8.0
+  rv_warn_z: 2.3
+  rv_derisk_z: 2.9
+  rv_flatten_z: 3.8
+  spread_warn_z: 2.0
+  spread_derisk_z: 3.0
+  depth_warn_drop_pct: 0.5
+  depth_derisk_drop_pct: 0.7
+  vpin_warn_pctl: 0.95     # raise sensitivity vs default 0.90
+  vpin_derisk_pctl: 0.97
+  vpin_flatten_pctl: 0.985
+  lambda_warn_z: 2.0
+  lambda_derisk_z: 2.5     # more responsive than prior 3.0
+  oi_dump_warn_pct: 0.10
+  oi_dump_derisk_pct: 0.20
+  funding_swing_warn_bps: 8.0
+  funding_swing_derisk_bps: 20.0
+  min_triggers_warn: 1
+  min_triggers_derisk: 2
+  min_triggers_flatten: 2
+  min_triggers_halt: 3
+
+live:
+  enabled: true
+  dry_run: true
+  exchange: binance_usdm
+  hot_reload_profiles: true

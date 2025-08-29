@@ -27,14 +27,7 @@ from ultra_signals.core.custom_types import EnsembleDecision
 
 # --- helpers -----------------------------------------------------------------
 
-def _escape_markdown_v2(text: str) -> str:
-    """
-    Escape characters required by Telegram MarkdownV2.
-    Keep '*' and '`' unescaped since we intentionally use them for emphasis/monospace.
-    """
-    escape_chars = r"_[]()~>#+-=|{}.!"
-    for ch in escape_chars:
-        text = text.replace(ch, f"\\{ch}")
+def _escape_markdown_v2(text: str) -> str:  # retained for backward compatibility (unused now)
     return text
 
 
@@ -106,124 +99,77 @@ def _format_filter_details(decision: EnsembleDecision) -> str:
     return "*Filters:* " + " | ".join(lines) + "\n"
 
 
-def format_message(decision: EnsembleDecision, settings: Dict) -> str:
+def format_message(decision: EnsembleDecision, settings: Dict, is_canary_debug: bool = False) -> str:
+    """Simplified, high‑readability Telegram message.
+
+    Removed: profile / regime / veto / latency / filter diagnostics to cut noise.
+    Focus: direction, confidence, vote ratio, and clean entry/SL/TP block with deltas.
     """
-    Formats an EnsembleDecision object into a human-readable Markdown string.
-
-    Escapes characters that are special in MarkdownV2.
-
-    Args:
-        decision: The `EnsembleDecision` object to format.
-        settings: The global application settings.
-
-    Returns:
-        A formatted string ready to be sent via Telegram.
-    """
-    # Choose icon, including neutral for FLAT/abstain
-    if decision.decision == "LONG":
-        icon = "📈"
-    elif decision.decision == "SHORT":
-        icon = "📉"
-    else:
-        icon = "⚪"
-
-    # Message header
-    header_title = f"New Ensemble Decision: {decision.decision} {decision.symbol}"
-    msg = (
-        f"{icon} *{header_title}* ({decision.tf})\n\n"
-        f"Ensemble Confidence: *{decision.confidence:.2%}*\n"
-    )
-
-    # Vote details (includes required Wgt Sum line)
-    if getattr(decision, "vote_detail", None):
-        vd = decision.vote_detail or {}
-        # Required fields per Sprint 8 spec
-        agree = vd.get("agree", 0)
-        total = vd.get("total", 0)
-        profile = vd.get("profile", "n/a")
-        weighted_sum = float(vd.get("weighted_sum", 0.0))
-
-        msg += (
-            f"Vote: `{agree}/{total}` "
-            f"| Profile: `{profile}` "
-            f"| Wgt Sum: `{weighted_sum:.3f}`\n"
-        )
-
-        # Compact pre-trade summary line (if set by live runner)
-        try:
-            pre = vd.get('pre_trade') if isinstance(vd, dict) else None
-            if pre and isinstance(pre, dict):
-                pwin = pre.get('p_win')
-                regime = pre.get('regime') or 'n/a'
-                veto_ct = pre.get('veto_count', 0)
-                lat = pre.get('lat_ms') or {}
-                p50 = lat.get('p50') if isinstance(lat, dict) else None
-                p90 = lat.get('p90') if isinstance(lat, dict) else None
-                if pwin is not None:
-                    msg += f"PRE: p={pwin:.2f} | reg={regime} | veto={veto_ct} | lat_p50={p50:.1f}ms p90={p90:.1f}ms\n"
-                else:
-                    msg += f"PRE: reg={regime} | veto={veto_ct}\n"
-        except Exception:
-            pass
-
-        # If the ensemble abstained (FLAT), include abstain reason if present
-        reason = vd.get("reason")
-        if decision.decision == "FLAT" and reason:
-            msg += f"Reason: `{str(reason)}`\n"
-
-    # Vetoes (explicit top reason line required) + full list
-    msg += _format_veto_block(decision)
-
-    # Optional Sprint-9 filter diagnostics (if your engine supplies them)
-    msg += _format_filter_details(decision)
-
-    msg += f"--------------------------------------\n"
-
-    # Sub-signal breakdown (format like: 🟢 strat_A_long (0.80))
-    msg += "*Contributing Signals:*\n"
-    for sub in getattr(decision, "subsignals", []) or []:
-        sub_icon = "🟢" if sub.direction == "LONG" else "🔴" if sub.direction == "SHORT" else "⚪"
-        # Keep plain (no backticks) to match the expected test string:
-        # "🟢 strat_A_long (0.80)"
-        # But we still sanitize visually dangerous characters lightly.
-        strategy_id_safe = (
-            str(sub.strategy_id)
-            .replace('*', '')
-            .replace('[', '')
-            .replace(']', '')
-        )
-        conf = getattr(sub, "confidence_calibrated", 0.0)
-        try:
-            conf_f = float(conf)
-        except Exception:
-            conf_f = 0.0
-        msg += f"{sub_icon} {strategy_id_safe} ({conf_f:.2f})\n"
-
-    # Escape for Telegram MarkdownV2 (keep * and ` intact)
-    msg = _escape_markdown_v2(msg)
-
-    # Append advanced sizer compact line (added post-escape to avoid double escaping multipliers formatting)
+    icon = "📈" if decision.decision == "LONG" else "📉" if decision.decision == "SHORT" else "⚪"
+    msg = f"{icon} *{decision.decision} {decision.symbol}* ({decision.tf})\n"
     try:
-        adv = None
-        if getattr(decision, 'vote_detail', None):
-            adv = decision.vote_detail.get('advanced_sizer') if isinstance(decision.vote_detail, dict) else None
-        if adv and isinstance(adv, dict) and decision.decision in ("LONG","SHORT"):
-            parts = []
-            rp = adv.get('risk_pct_effective')
-            if rp is not None:
-                parts.append(f"Sz={float(rp):.2f}%")
-            for k,label in [('conv_meta','Meta'),('conv_mtc','MTC'),('dd_mult','DD'),('kelly_mult','Kelly')]:
-                v = adv.get(k)
-                try:
-                    if v is not None:
-                        parts.append(f"{label}={float(v):.2f}")
-                except Exception:
-                    continue
-            line = " " + _escape_markdown_v2(" • ".join(parts)) + "\n"
-            msg += line
+        msg += f"Confidence: *{decision.confidence:.2%}*\n"
     except Exception:
         pass
 
+    vd = decision.vote_detail or {}
+    # Vote ratio
+    try:
+        a = vd.get('agree'); t = vd.get('total')
+        if a is not None and t is not None:
+            msg += f"Vote {a}/{t}\n"
+    except Exception:
+        pass
+
+    # Entry / SL / TP block
+    try:
+        if all(k in vd for k in ('entry','sl','tp')):
+            entry = float(vd.get('entry'))
+            sl = float(vd.get('sl'))
+            tp = float(vd.get('tp'))
+            lev = vd.get('lev')
+            risk_pct = vd.get('risk_pct')
+            rr = vd.get('rr')
+            sl_delta = ((sl-entry)/entry)*100 if entry else 0.0
+            tp_delta = ((tp-entry)/entry)*100 if entry else 0.0
+            msg += (
+                f"Entry  {entry:.4f}\n"
+                f"SL     {sl:.4f} ({sl_delta:+.2f}%)\n"
+                f"TP     {tp:.4f} ({tp_delta:+.2f}%)\n"
+            )
+            tail = []
+            if lev is not None:
+                try: tail.append(f"Lev {float(lev):.1f}x")
+                except Exception: pass
+            if risk_pct is not None:
+                try: tail.append(f"Risk {float(risk_pct):.2f}%")
+                except Exception: pass
+            if rr is not None:
+                try: tail.append(f"RR {float(rr):.2f}")
+                except Exception: pass
+            if tail:
+                msg += " | ".join(tail) + "\n"
+    except Exception:
+        pass
+
+    # Sub‑signals single line
+    subs = []
+    for sub in getattr(decision, 'subsignals', []) or []:
+        try:
+            s_icon = '🟢' if sub.direction == 'LONG' else '🔴' if sub.direction == 'SHORT' else '⚪'
+            subs.append(f"{s_icon}{sub.strategy_id}({float(getattr(sub,'confidence_calibrated',0.0)):.2f})")
+        except Exception:
+            continue
+    if subs:
+        msg += "Signals: " + ", ".join(subs) + "\n"
+
+    # Reason for flat (only if explicitly asked for blocked debug)
+    if is_canary_debug and decision.decision == 'FLAT':
+        reason = vd.get('reason')
+        if reason:
+            msg += f"Reason: {reason}\n"
+
+    # Plain text return (no Markdown parse mode to maximize readability)
     return msg
 
 
@@ -267,8 +213,7 @@ async def send_message(text: str, settings: Dict):
         for idx, chunk in enumerate(messages, start=1):
             payload = {
                 "chat_id": chat_id,
-                "text": chunk,
-                "parse_mode": "MarkdownV2",
+                "text": chunk,  # plain text for readability
             }
 
             for attempt in range(max_retries):
@@ -309,6 +254,17 @@ async def send_message(text: str, settings: Dict):
 async def send_decision(decision: EnsembleDecision, settings: Dict):
     """
     Convenience wrapper: format the decision and send it (honors dry_run).
+    Also handles sending of blocked signals for canary debugging.
     """
-    text = format_message(decision, settings)
-    await send_message(text, settings)
+    tg_settings = settings.get('telegram', {})
+    send_blocked = tg_settings.get('send_blocked_signals_in_canary', False)
+    is_canary_debug = send_blocked
+
+    # Standard logic: only send non-flat decisions
+    if decision.decision in ("LONG", "SHORT"):
+        text = format_message(decision, settings, is_canary_debug=False)
+        await send_message(text, settings)
+    # Canary debug logic: if enabled, send FLAT decisions that were vetoed
+    elif send_blocked and decision.decision == "FLAT" and getattr(decision, "vetoes", None):
+        text = format_message(decision, settings, is_canary_debug=True)
+        await send_message(text, settings)

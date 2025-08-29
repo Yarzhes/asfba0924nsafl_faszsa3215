@@ -1,0 +1,136 @@
+# snapshot_ts 1756471356
+# TYPE orders_sent_total counter
+orders_sent_total 0
+# TYPE orders_errors_total counter
+orders_errors_total 0
+# TYPE sniper_hourly_cap_total counter
+sniper_hourly_cap_total 0
+# TYPE sniper_daily_cap_total counter
+sniper_daily_cap_total 0
+# TYPE sniper_mtf_required_total counter
+sniper_mtf_required_total 0
+# TYPE signals_candidates_total counter
+signals_candidates_total 1
+# TYPE uptime_sec gauge
+uptime_sec 4.2
+
+# snapshot_ts 1756471357
+# TYPE orders_sent_total counter
+orders_sent_total 0
+# TYPE orders_errors_total counter
+orders_errors_total 0
+# TYPE sniper_hourly_cap_total counter
+sniper_hourly_cap_total 0
+# TYPE sniper_daily_cap_total counter
+sniper_daily_cap_total 0
+# TYPE sniper_mtf_required_total counter
+sniper_mtf_required_total 0
+# TYPE signals_candidates_total counter
+signals_candidates_total 1
+# TYPE uptime_sec gauge
+uptime_sec 0.0
+# TYPE signals_blocked_total counter
+signals_blocked_total{reason="MISSING_BOOK_TICKER"} 1
+
+# snapshot_ts 1756471460
+# TYPE orders_sent_total counter
+orders_sent_total 0
+# TYPE orders_errors_total counter
+orders_errors_total 0
+# TYPE sniper_hourly_cap_total counter
+sniper_hourly_cap_total 0
+# TYPE sniper_daily_cap_total counter
+sniper_daily_cap_total 0
+# TYPE sniper_mtf_required_total counter
+sniper_mtf_required_total 0
+# TYPE signals_candidates_total counter
+signals_candidates_total 1
+# TYPE uptime_sec gauge
+uptime_sec 4.2
+
+# snapshot_ts 1756471461
+# TYPE orders_sent_total counter
+orders_sent_total 0
+# TYPE orders_errors_total counter
+orders_errors_total 0
+# TYPE sniper_hourly_cap_total counter
+sniper_hourly_cap_total 0
+# TYPE sniper_daily_cap_total counter
+sniper_daily_cap_total 0
+# TYPE sniper_mtf_required_total counter
+sniper_mtf_required_total 0
+# TYPE signals_candidates_total counter
+signals_candidates_total 1
+# TYPE uptime_sec gauge
+uptime_sec 0.0
+# TYPE signals_blocked_total counter
+signals_blocked_total{reason="MISSING_BOOK_TICKER"} 1
+
+# snapshot_ts 1756472371
+# TYPE orders_sent_total counter
+orders_sent_total 0
+# TYPE orders_errors_total counter
+orders_errors_total 0
+# TYPE sniper_hourly_cap_total counter
+sniper_hourly_cap_total 0
+# TYPE sniper_daily_cap_total counter
+sniper_daily_cap_total 0
+# TYPE sniper_mtf_required_total counter
+sniper_mtf_required_total 0
+# TYPE signals_candidates_total counter
+signals_candidates_total 1
+# TYPE uptime_sec gauge
+uptime_sec 4.2
+
+# snapshot_ts 1756472373
+# TYPE orders_sent_total counter
+orders_sent_total 0
+# TYPE orders_errors_total counter
+orders_errors_total 0
+# TYPE sniper_hourly_cap_total counter
+sniper_hourly_cap_total 0
+# TYPE sniper_daily_cap_total counter
+sniper_daily_cap_total 0
+# TYPE sniper_mtf_required_total counter
+sniper_mtf_required_total 0
+# TYPE signals_candidates_total counter
+signals_candidates_total 1
+# TYPE uptime_sec gauge
+uptime_sec 0.0
+# TYPE signals_blocked_total counter
+signals_blocked_total{reason="MISSING_BOOK_TICKER"} 1
+
+# snapshot_ts 1756472541
+# TYPE orders_sent_total counter
+orders_sent_total 0
+# TYPE orders_errors_total counter
+orders_errors_total 0
+# TYPE sniper_hourly_cap_total counter
+sniper_hourly_cap_total 0
+# TYPE sniper_daily_cap_total counter
+sniper_daily_cap_total 0
+# TYPE sniper_mtf_required_total counter
+sniper_mtf_required_total 0
+# TYPE signals_candidates_total counter
+signals_candidates_total 1
+# TYPE uptime_sec gauge
+uptime_sec 0.2
+
+# snapshot_ts 1756472543
+# TYPE orders_sent_total counter
+orders_sent_total 0
+# TYPE orders_errors_total counter
+orders_errors_total 0
+# TYPE sniper_hourly_cap_total counter
+sniper_hourly_cap_total 0
+# TYPE sniper_daily_cap_total counter
+sniper_daily_cap_total 0
+# TYPE sniper_mtf_required_total counter
+sniper_mtf_required_total 0
+# TYPE signals_candidates_total counter
+signals_candidates_total 1
+# TYPE uptime_sec gauge
+uptime_sec 0.0
+# TYPE signals_blocked_total counter
+signals_blocked_total{reason="MISSING_BOOK_TICKER"} 1
+

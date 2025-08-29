@@ -11,6 +11,23 @@ resolve against the package (directory) rather than the sibling module
 
 from .advanced_sizer import AdvancedSizer  # re-export
 
+# Import from the legacy sizing module for backward compatibility
+import sys
+from pathlib import Path
+
+# Add parent directory to path to import the legacy sizing module
+parent_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(parent_dir))
+
+try:
+    from sizing import determine_position_size
+except ImportError:
+    # Fallback - define a minimal version
+    def determine_position_size(signal, settings):
+        return signal
+
+sys.path.pop(0)
+
 from typing import Dict
 
 def apply_volatility_scaling(base_risk: float, atr_percentile: float, cfg: Dict) -> float:
@@ -30,4 +47,4 @@ def apply_volatility_scaling(base_risk: float, atr_percentile: float, cfg: Dict)
 	except Exception:  # pragma: no cover defensive
 		return base_risk
 
-__all__ = ["AdvancedSizer", "apply_volatility_scaling"]
+__all__ = ["AdvancedSizer", "apply_volatility_scaling", "determine_position_size"]

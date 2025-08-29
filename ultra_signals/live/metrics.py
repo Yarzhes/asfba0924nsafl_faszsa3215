@@ -62,7 +62,18 @@ class Metrics:
 
         # counters and gauges
         self.queue_depths = {}
-        self.counters = {"orders_sent": 0, "orders_errors": 0, "sniper_hourly_cap": 0, "sniper_daily_cap": 0, "sniper_mtf_required": 0}
+        # Core counters. Additional dynamic counters (per-block reason) created on demand.
+        self.counters = {
+            "orders_sent": 0,
+            "orders_errors": 0,
+            "sniper_hourly_cap": 0,
+            "sniper_daily_cap": 0,
+            "sniper_mtf_required": 0,
+            # Signal lifecycle counters
+            "signals_candidates": 0,
+            "signals_allowed": 0,
+            "signals_blocked": 0,
+        }
 
         self.needs_resync_counter = 0
 
@@ -169,6 +180,25 @@ class Metrics:
             self.inc('sniper_daily_cap')
         elif 'mtf' in reason_lower:
             self.inc('sniper_mtf_required')
+
+    # ----- Signal lifecycle helpers -----------------------------------
+    def record_candidate(self) -> None:
+        self.inc('signals_candidates')
+
+    def record_allowed(self) -> None:
+        self.inc('signals_allowed')
+
+    def record_block(self, reason: str) -> None:
+        self.inc('signals_blocked')
+        if not reason:
+            return
+        # Support multi-reason strings separated by ;
+        for r in str(reason).split(';'):
+            r = r.strip()
+            if not r:
+                continue
+            key = f"block_{r.lower()}"
+            self.inc(key)
 
 
 __all__ = ["Metrics", "Histogram"]

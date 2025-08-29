@@ -15,10 +15,10 @@ from .momentum import compute_momentum_features
 from .trend import compute_trend_features
 from .volatility import compute_volatility_features
 from .volume_flow import compute_volume_flow_features
-from .orderbook import compute_orderbook_features
+from .orderbook import compute_orderbook_features, BookFlipState
 from .derivatives import compute_derivatives_features
 from .funding import compute_funding_features
-from .cvd import compute_cvd_features
+from .cvd import compute_cvd_features, CvdState
 from .alpha_v2 import compute_alpha_v2_features
 
 # Compatibility aliases (legacy names used across the codebase)
@@ -42,6 +42,8 @@ __all__ = [
     "compute_cvd_features",
     "compute_alpha_v2_features",
     "compute_orderbook_features_v2",
+    "BookFlipState",
+    "CvdState",
 ]
 
 # alias advanced orderbook fn

@@ -92,9 +92,12 @@ def make_signal(
 
     # 2. Make a decision based on the entry threshold
     decision: Literal["LONG", "SHORT", "NO_TRADE"] = "NO_TRADE"
-    if final_score >= thresholds.enter:
+    # Handle both object and dictionary thresholds
+    enter_threshold = thresholds.enter if hasattr(thresholds, 'enter') else thresholds.get('enter', 0.01)
+    
+    if final_score >= enter_threshold:
         decision = "LONG"
-    elif final_score <= -thresholds.enter:
+    elif final_score <= -enter_threshold:
         decision = "SHORT"
 
     # 3. If no trade, return a simple signal object

@@ -44,7 +44,7 @@ from ultra_signals.features import (
 from ultra_signals.engine.scoring import component_scores
 from ultra_signals.engine.entries_exits import make_signal
 from ultra_signals.engine.risk_filters import apply_filters
-from ultra_signals.engine.sizing import determine_position_size
+import ultra_signals.engine.sizing as sizing_module
 from ultra_signals.transport.telegram import format_message, send_message
 from ultra_signals.live.metrics import Metrics
 
@@ -126,37 +126,41 @@ async def main_loop():
                     f"expected={id(feature_store)} got={singleton_id_now}"
                 )
 
-            # --- 4. Trigger on Closed Kline for Primary Timeframe ---
-            if not isinstance(event, KlineEvent) or not event.closed:
+            # --- 4. Trigger on ANY Kline Update for Primary Timeframe ---
+            if not isinstance(event, KlineEvent):
                 continue
 
             kline = event  # For clarity
             if kline.timeframe != settings.runtime.primary_timeframe:
                 continue
 
-            logger.info(
-                f"Processing closed kline for {kline.symbol}/{kline.timeframe} "
+            # Process BOTH open and closed klines for real-time signal generation
+            status = "CLOSED" if kline.closed else "OPEN"
+            logger.debug(
+                f"Processing {status} kline for {kline.symbol}/{kline.timeframe} "
                 f"(FeatureStore id={id(feature_store)})..."
             )
 
             # --- 5. Feature Computation ---
             ohlcv = feature_store.get_ohlcv(kline.symbol, kline.timeframe)
             if ohlcv is None or len(ohlcv) < settings.features.warmup_periods:
-                logger.debug(
-                    f"Not enough data for {kline.symbol}/{kline.timeframe} to compute features yet."
+                logger.info(
+                    f"[DEBUG] {kline.symbol} warmup check: ohlcv_len={len(ohlcv) if ohlcv is not None else 0}, required={settings.features.warmup_periods} - SKIPPING"
                 )
                 continue
+
+            logger.info(f"[DEBUG] {kline.symbol} warmup check: PASSED with {len(ohlcv)} periods")
 
             # --- 5a. OHLCV-based features ---
             ohlcv_features: dict = {}
             ohlcv_features.update(
-                compute_trend(ohlcv, settings.features.trend.model_dump())
+                compute_trend(ohlcv, **settings.features.trend.model_dump())
             )
             ohlcv_features.update(
-                compute_momentum(ohlcv, settings.features.momentum.model_dump())
+                compute_momentum(ohlcv, **settings.features.momentum.model_dump())
             )
             ohlcv_features.update(
-                compute_volatility(ohlcv, settings.features.volatility.model_dump())
+                compute_volatility(ohlcv, **settings.features.volatility.model_dump())
             )
             ohlcv_features.update(
                 compute_volume_flow_features(
@@ -175,19 +179,26 @@ async def main_loop():
                 derivatives_features = compute_derivatives_features(feature_store, kline.symbol)
             funding_features = compute_funding_features(feature_store, kline.symbol)
 
-            # --- 5c. V2 Features ---
-            ob_v2_features = compute_orderbook_features_v2(
-                feature_store,
-                kline.symbol,
-                book_flip_states[kline.symbol],
-                settings.features.orderbook_v2.model_dump(),
-            )
-            cvd_features = compute_cvd_features(
-                feature_store,
-                kline.symbol,
-                cvd_states[kline.symbol],
-                settings.features.cvd.model_dump(),
-            )
+            # --- 5c. V2 Features (optional) ---
+            ob_v2_features = None
+            cvd_features = None
+            
+            # Only compute if configurations exist
+            if hasattr(settings.features, 'orderbook_v2'):
+                ob_v2_features = compute_orderbook_features_v2(
+                    feature_store,
+                    kline.symbol,
+                    book_flip_states[kline.symbol],
+                    settings.features.orderbook_v2.model_dump(),
+                )
+            
+            if hasattr(settings.features, 'cvd'):
+                cvd_features = compute_cvd_features(
+                    feature_store,
+                    kline.symbol,
+                    cvd_states[kline.symbol],
+                    settings.features.cvd.model_dump(),
+                )
 
             # Merge V2 features into the orderbook features dictionary for now
             if orderbook_features and ob_v2_features:
@@ -200,7 +211,7 @@ async def main_loop():
                 symbol=kline.symbol,
                 timeframe=kline.timeframe,
                 ohlcv=ohlcv_features,
-                orderbook=orderbook_features,
+                orderbook=orderbook_features.__dict__ if orderbook_features else None,
                 derivatives=derivatives_features,
                 funding=funding_features,
             )
@@ -209,20 +220,33 @@ async def main_loop():
             scores = component_scores(
                 feature_vector, settings.features.model_dump()
             )
+            
+            # DEBUG: Log scoring details
+            weights = settings.engine.scoring_weights.model_dump() if hasattr(settings.engine.scoring_weights, 'model_dump') else settings.engine.scoring_weights
+            final_score = sum(scores.get(comp, 0.0) * w for comp, w in weights.items())
+            final_score = max(-1.0, min(1.0, final_score))  # Clip to [-1, 1]
+            logger.info(f"[DEBUG] {kline.symbol} scoring: scores={scores}, weights={weights}, final_score={final_score}, threshold={settings.engine.thresholds.enter}")
 
+            # Handle weights and thresholds properly - could be dict or Pydantic model  
+            weights = settings.engine.scoring_weights.model_dump() if hasattr(settings.engine.scoring_weights, 'model_dump') else settings.engine.scoring_weights
+            thresholds = settings.engine.thresholds.model_dump() if hasattr(settings.engine.thresholds, 'model_dump') else settings.engine.thresholds
+            
             signal = make_signal(
                 symbol=kline.symbol,
                 timeframe=kline.timeframe,
                 component_scores=scores,
-                weights=settings.engine.scoring_weights.model_dump(),
-                thresholds=settings.engine.thresholds.model_dump(),
+                weights=weights,
+                thresholds=thresholds,
                 features=feature_vector,
                 ohlcv=ohlcv,
             )
+            
+            # DEBUG: Log signal generation result
+            logger.info(f"[DEBUG] {kline.symbol} signal generated: decision={signal.decision}, score={signal.score:.3f}")
 
             # --- 7. Risk Filtering and Sizing ---
             # IMPORTANT: pass the SAME feature_store instance into filters
-            risk_result = apply_filters(signal, feature_store, settings.model_dump())
+            risk_result = apply_filters(signal, feature_store, settings.model_dump(), metrics=metrics)
             if not risk_result.passed:
                 logger.info(
                     f"Signal for {signal.symbol} blocked by risk filter: {risk_result.reason}"
@@ -234,7 +258,7 @@ async def main_loop():
                 
                 continue
 
-            sized_signal = determine_position_size(signal, settings.model_dump())
+            sized_signal = sizing_module.determine_position_size(signal, settings.model_dump())
 
             # --- 8. Transport / Notification ---
             if sized_signal.decision != "NO_TRADE":

@@ -85,7 +85,7 @@ class BinanceWSClient:
 
         This method is an async generator that will run indefinitely, yielding
         `MarketEvent` objects as they are received. It handles all connection
-        logic, including reconnections.
+        logic, including reconnections and ping/pong keepalives.
 
         Yields:
             MarketEvent: A validated Pydantic model of a supported market event.
@@ -93,21 +93,36 @@ class BinanceWSClient:
         self._is_running = True
         while self._is_running:
             try:
-                async with websockets.connect(self._ws_url, ping_interval=20, ping_timeout=10) as ws:
-                    self._connection = ws
-                    self._reconnect_attempts = 0
-                    logger.success("WebSocket connection established successfully.")
-                    
-                    async for message in ws:
-                        try:
-                            event = self._parse_message(message)
-                            if event:
-                                yield event
-                        except (ValidationError, json.JSONDecodeError) as e:
-                            logger.warning(f"Failed to parse WebSocket message: {e}. Message: {message[:150]}")
+                # Set a timeout for the connection attempt
+                async with asyncio.timeout(30):
+                    async with websockets.connect(
+                        self._ws_url,
+                        ping_interval=25,  # Send a ping every 25 seconds
+                        ping_timeout=20,   # Wait 20 seconds for a pong response
+                        close_timeout=10,
+                        extra_headers={"User-Agent": "UltraSignals/1.0"},
+                    ) as ws:
+                        self._connection = ws
+                        self._reconnect_attempts = 0
+                        logger.success("WebSocket connection established successfully.")
 
+                        # Start a task to drain incoming messages
+                        async for message in ws:
+                            try:
+                                event = self._parse_message(message)
+                                if event:
+                                    yield event
+                            except (ValidationError, json.JSONDecodeError) as e:
+                                logger.warning(f"Failed to parse WebSocket message: {e}. Message: {message[:150]}")
+
+            except TimeoutError:
+                logger.warning("WebSocket connection attempt timed out. Retrying...")
+                await self._reconnect()
             except (ConnectionClosed, WebSocketException, OSError) as e:
-                logger.warning(f"WebSocket connection error: {e}. Attempting to reconnect...")
+                # Check for specific close codes if available
+                close_code = getattr(e, 'code', 'N/A')
+                reason = getattr(e, 'reason', 'N/A')
+                logger.warning(f"WebSocket connection error: {e} (Code: {close_code}, Reason: {reason}). Attempting to reconnect...")
                 if not self._is_running:
                     break
                 await self._reconnect()

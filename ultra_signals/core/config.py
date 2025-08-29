@@ -383,6 +383,9 @@ class TelegramSettings(BaseModel):
     enabled: bool = True
     bot_token: Optional[str] = None
     chat_id: Optional[str] = None
+    message_template: Optional[str] = None
+    send_pre_summary: bool = False
+    send_blocked_signals_in_canary: bool = False
 
 class TransportSettings(BaseModel):
     """Container for all transport-related settings."""

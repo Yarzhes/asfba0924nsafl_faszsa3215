@@ -186,7 +186,11 @@ def component_scores(features: FeatureVector, config_params: Dict) -> Dict[str, 
     derivatives = derivatives_score(getattr(features, "derivatives", None), ohlcv_dict)
 
     pullback = trend_pullback_score(getattr(features, "volume_flow", {}) or {}, getattr(features, "orderbook", None), config_params)
-    breakout = breakout_score(getattr(features, "derivatives", None), getattr(features, "orderbook", None))
+    
+    # Convert derivatives to dict if it's a Pydantic object
+    derivatives_obj = getattr(features, "derivatives", None)
+    derivatives_dict = derivatives_obj.model_dump() if derivatives_obj and hasattr(derivatives_obj, 'model_dump') else derivatives_obj
+    breakout = breakout_score(derivatives_dict, getattr(features, "orderbook", None))
 
     # Patterns: if FeatureVector supplies a 'patterns' dict/list, map to numeric bucket
     patterns_val = 0.0
@@ -226,7 +230,7 @@ def component_scores(features: FeatureVector, config_params: Dict) -> Dict[str, 
         "derivatives": derivatives,
         "pullback_confluence": pullback,
         "breakout_confluence": breakout,
-    "patterns": float(max(-1.0, min(1.0, patterns_val))) ,
+        "patterns": float(max(-1.0, min(1.0, patterns_val))),
     }
 
     rs = getattr(features, "rs", {}) or {}

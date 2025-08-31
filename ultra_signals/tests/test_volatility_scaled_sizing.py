@@ -1,5 +1,5 @@
 import pytest
-from ultra_signals.engine.sizing import apply_volatility_scaling
+from ultra_signals.engine.position_sizer import apply_volatility_scaling
 
 @pytest.fixture
 def mock_config():

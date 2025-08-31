@@ -41,24 +41,25 @@ class Signal:
     
     # Fields with default values
     score: float = 0.0
-    confidence: float = 0.0 # From 0 to 100
+    confidence: float = 0.0 # From 0 to 1
     entry_price: float = 0.0
     stop_loss: float = 0.0
     take_profit_1: float = 0.0
     take_profit_2: float = 0.0
     component_scores: Dict[str, float] = field(default_factory=dict)
+    vote_detail: Dict = field(default_factory=dict)  # Added for risk filter compatibility
 
 
 # --- Signal Generation Logic ---
 
 def _calculate_confidence(score: float, alpha: float = 2.0) -> float:
     """
-    Maps a score from [-1, 1] to a confidence level [0, 100]
+    Maps a score from [-1, 1] to a confidence level [0, 1]
     using a scaled sigmoid-like function.
     """
     # Simple sigmoid: 1 / (1 + exp(-ax))
     # We use abs(score) because confidence is about magnitude, not direction.
-    return 100 / (1 + np.exp(-alpha * abs(score) * 5)) # Scaled to feel responsive
+    return 1.0 / (1 + np.exp(-alpha * abs(score) * 5)) # Scaled to feel responsive
 
 def make_signal(
     symbol: str,

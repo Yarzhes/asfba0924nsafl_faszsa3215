@@ -22,11 +22,22 @@ def compute_volatility_features(ohlcv: pd.DataFrame, atr_period: int = 14, bband
     """
     high, low, close = ohlcv['high'], ohlcv['low'], ohlcv['close']
 
-    # Calculate ATR
-    atr_series = high - low # Simplified ATR for this test
+    # Calculate ATR using proper True Range calculation
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = abs(high - prev_close)
+    tr3 = abs(low - prev_close)
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_series = true_range.ewm(span=atr_period, adjust=False).mean()
 
-    # Calculate ATR Percentile
-    atr_percentile = atr_series.rolling(window=atr_percentile_window).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1])
+    # Calculate ATR Percentile with proper error handling
+    if len(atr_series) >= atr_percentile_window:
+        atr_percentile = atr_series.rolling(window=atr_percentile_window).apply(
+            lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else float('nan'), 
+            raw=False
+        )
+    else:
+        atr_percentile = pd.Series([float('nan')] * len(atr_series), index=atr_series.index)
 
     # Calculate Bollinger Bands components
     bb_indicator = BollingerBands(close=close, window=bbands_period, window_dev=bbands_stddev)

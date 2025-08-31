@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import time
 import os
+import sys
+import traceback
 from typing import Dict, Any, Optional
 from loguru import logger
 from ultra_signals.core.events import KlineEvent, MarketEvent, BookTickerEvent
@@ -256,6 +258,17 @@ class EngineWorker:
                 except Exception as e:
                     logger.error(f"engine.pre_bar_guard_block symbol={evt.symbol} err={e}")
                     continue
+                try:
+                    store_ref_dbg = getattr(self.feed_ref, 'feature_store', None) or getattr(self, 'feature_store', None)
+                    warm_ct = None
+                    if store_ref_dbg is not None and hasattr(store_ref_dbg, 'get_warmup_status'):
+                        try:
+                            warm_ct = store_ref_dbg.get_warmup_status(evt.symbol, evt.timeframe)
+                        except Exception:
+                            warm_ct = None
+                    logger.info(f"[EngineWorker][BAR] closed kline sym={evt.symbol} tf={evt.timeframe} warmup_ct={warm_ct} store_attached={store_ref_dbg is not None}")
+                except Exception:
+                    pass
                 started = time.perf_counter()
                 # Force artificial delay if requested (test hook)
                 if self.extra_delay_ms:
@@ -294,8 +307,10 @@ class EngineWorker:
                                     except Exception:
                                         pass
                                 continue
-                        except Exception:
+                        except Exception as e:
                             # treat as block if filters explode
+                            logger.error(f"[EngineWorker] FILTER_ERR: Exception during apply_filters for {sig.symbol} {sig.timeframe}: {e}")
+                            traceback.print_exc(file=sys.stderr) # Print full traceback to stderr
                             if self.metrics and hasattr(self.metrics, 'record_block'):
                                 try:
                                     self.metrics.record_block('FILTER_ERR')

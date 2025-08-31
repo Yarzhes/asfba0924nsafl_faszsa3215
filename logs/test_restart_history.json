@@ -1,0 +1,14 @@
+{
+  "test_scenario": "crash",
+  "supervisor_start": "2025-08-31T07:53:58.989035",
+  "total_restarts": 1,
+  "max_restarts": 1,
+  "restarts": [
+    {
+      "timestamp": "2025-08-31T07:53:59.132227",
+      "restart_number": 1,
+      "reason": "Test exit code: 1",
+      "uptime_seconds": 0.1432023048400879
+    }
+  ]
+}

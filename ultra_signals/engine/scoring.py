@@ -24,11 +24,30 @@ def _get(src, attr: str = None, key: str = None, default=None):
     Returns `default` if nothing is found.
     """
     if src is None:
+        logger.info(f"[_GET DEBUG] src is None, returning default: {default}")
         return default
+    
+    # For dict inputs, prioritize key lookup
+    if isinstance(src, dict):
+        logger.info(f"[_GET DEBUG] Dict input - looking for key='{key}', attr='{attr}' in keys: {list(src.keys())}")
+        if key is not None and key in src:
+            value = src[key]
+            logger.info(f"[_GET DEBUG] Found key '{key}' with value: {value}")
+            return value
+        if attr is not None and attr in src:
+            value = src[attr]
+            logger.info(f"[_GET DEBUG] Found attr '{attr}' with value: {value}")
+            return value
+        logger.info(f"[_GET DEBUG] Neither key '{key}' nor attr '{attr}' found, returning default: {default}")
+        return default
+    
+    # For object inputs, try attribute access
     if attr is not None and hasattr(src, attr):
-        return getattr(src, attr)
-    if isinstance(src, dict) and key is not None:
-        return src.get(key, default)
+        value = getattr(src, attr)
+        logger.info(f"[_GET DEBUG] Object attribute '{attr}' found with value: {value}")
+        return value
+    
+    logger.info(f"[_GET DEBUG] No match found, returning default: {default}")
     return default
 
 
@@ -40,22 +59,72 @@ def trend_score(src, params: Dict) -> float:
     - Supports dataclass inputs with attributes: ema_short, ema_medium, ema_long
     - Also supports dict inputs with keys: ema_{period}
     """
+    logger.info(f"[TREND DEBUG] trend_score called with src type: {type(src)}")
+    logger.info(f"[TREND DEBUG] src content: {src}")
+    
     p = params.get("trend", {})
-    ema_s = _get(src, "ema_short", f"ema_{p.get('ema_short', 10)}")
-    ema_m = _get(src, "ema_medium", f"ema_{p.get('ema_medium', 20)}")
-    ema_l = _get(src, "ema_long", f"ema_{p.get('ema_long', 50)}")
-    if None in (ema_s, ema_m, ema_l):
+    logger.info(f"[TREND DEBUG] trend params: {p}")
+    
+    # Try to get EMA values with detailed logging
+    ema_s_key = f"ema_{p.get('ema_short', 10)}"
+    ema_m_key = f"ema_{p.get('ema_medium', 20)}"
+    ema_l_key = f"ema_{p.get('ema_long', 50)}"
+    
+    logger.info(f"[TREND DEBUG] Looking for keys: {ema_s_key}, {ema_m_key}, {ema_l_key}")
+    
+    ema_s_raw = _get(src, "ema_short", ema_s_key)
+    ema_m_raw = _get(src, "ema_medium", ema_m_key)
+    ema_l_raw = _get(src, "ema_long", ema_l_key)
+    
+    logger.info(f"[TREND DEBUG] Raw EMA values: s={ema_s_raw}, m={ema_m_raw}, l={ema_l_raw}")
+    
+    # Handle NaN values
+    if (ema_s_raw is None or np.isnan(ema_s_raw) or 
+        ema_m_raw is None or np.isnan(ema_m_raw) or 
+        ema_l_raw is None or np.isnan(ema_l_raw)):
+        logger.info(f"[TREND DEBUG] NaN/None values detected - ema_s={ema_s_raw}, ema_m={ema_m_raw}, ema_l={ema_l_raw}")
         return 0.0
+    
+    ema_s = float(ema_s_raw)
+    ema_m = float(ema_m_raw)
+    ema_l = float(ema_l_raw)
 
+    # Debug logging to see what's happening
+    logger.info(f"[TREND DEBUG] EMAs: s={ema_s:.6f}, m={ema_m:.6f}, l={ema_l:.6f}")
+    logger.info(f"[TREND DEBUG] s>m: {ema_s > ema_m}, m>l: {ema_m > ema_l}")
+    logger.info(f"[TREND DEBUG] Perfect bull: {ema_s > ema_m > ema_l}, Perfect bear: {ema_s < ema_m < ema_l}")
+
+    # Ultra-sensitive scoring for testing - any EMA separation generates signal
     # Perfect alignment → ±1; otherwise partial credit
     if ema_s > ema_m > ema_l:
-        return 1.0
+        logger.info(f"[TREND DEBUG] Returning +1.0 (perfect bullish)")
+        return 1.0  # Strong bullish
     if ema_s < ema_m < ema_l:
-        return -1.0
+        logger.info(f"[TREND DEBUG] Returning -1.0 (perfect bearish)")
+        return -1.0  # Strong bearish
 
+    # Generate signals for ANY EMA difference (restore stricter logic later)
     score = 0.0
-    score += 0.5 if ema_s > ema_m else -0.5
-    score += 0.5 if ema_m > ema_l else -0.5
+    if ema_s > ema_m:
+        score += 0.5
+    elif ema_s < ema_m:
+        score -= 0.5
+        
+    if ema_m > ema_l:
+        score += 0.5
+    elif ema_m < ema_l:
+        score -= 0.5
+        
+    # If EMAs are too close, still generate small signal for testing
+    if score == 0.0:
+        # Use tiny differences to generate minimal signals
+        ema_diff_1 = ema_s - ema_m
+        ema_diff_2 = ema_m - ema_l
+        if abs(ema_diff_1) > 0 or abs(ema_diff_2) > 0:
+            score = 0.1 if (ema_diff_1 + ema_diff_2) > 0 else -0.1
+            logger.info(f"[TREND DEBUG] Using tiny diff: diff1={ema_diff_1:.8f}, diff2={ema_diff_2:.8f}, score={score}")
+    
+    logger.info(f"[TREND DEBUG] Final score: {score}")
     return float(np.clip(score, -1.0, 1.0))
 
 
@@ -67,16 +136,32 @@ def momentum_score(src, params: Dict) -> float:
     - RSI drives the sign; MACD is confirmation (light weight).
     """
     p = params.get("momentum", {})
-    rsi = float(_get(src, "rsi", f"rsi_{p.get('rsi_period', 14)}", 50.0))
-    macd_hist = float(_get(src, "macd_hist", "macd_hist", 0.0))
+    rsi_raw = _get(src, "rsi", f"rsi_{p.get('rsi_period', 14)}", 50.0)
+    macd_hist_raw = _get(src, "macd_hist", "macd_hist", 0.0)
+    
+    # Handle NaN values by defaulting to neutral values
+    if rsi_raw is None or np.isnan(rsi_raw):
+        rsi = 50.0  # Neutral RSI
+        logger.debug(f"Momentum score: RSI NaN, using neutral value 50.0")
+    else:
+        rsi = float(rsi_raw)
+        
+    if macd_hist_raw is None or np.isnan(macd_hist_raw):
+        macd_hist = 0.0  # Neutral MACD
+        logger.debug(f"Momentum score: MACD NaN, using neutral value 0.0")
+    else:
+        macd_hist = float(macd_hist_raw)
 
     rsi_part = (rsi - 50.0) / 50.0                  # ~[-1, 1]
     macd_part = float(np.clip(macd_hist * 10.0, -1.0, 1.0))
     score = 0.8 * rsi_part + 0.2 * macd_part
 
+    logger.debug(f"Momentum score: RSI={rsi:.2f}, MACD={macd_hist:.4f}, rsi_part={rsi_part:.3f}, macd_part={macd_part:.3f}, score={score:.3f}")
+
     # If RSI is clearly bearish but MACD slightly bullish, keep a small negative tilt.
     if rsi < 45 and macd_hist < 0.2 and score > 0:
         score = min(score, -0.05)
+        logger.debug(f"Momentum score: Applied bearish tilt, final score={score:.3f}")
 
     return float(np.clip(score, -1.0, 1.0))
 
@@ -179,7 +264,10 @@ def component_scores(features: FeatureVector, config_params: Dict) -> Dict[str, 
     mom_src   = getattr(features, "momentum", None) or ohlcv_dict
     vol_src   = getattr(features, "volatility", None) or {}
 
+    logger.info(f"[COMPONENT DEBUG] trend_src type: {type(trend_src)}, content: {trend_src}")
+    logger.info(f"[COMPONENT DEBUG] Calling trend_score function...")
     trend = trend_score(trend_src, config_params)
+    logger.info(f"[COMPONENT DEBUG] trend_score returned: {trend}")
     momentum = momentum_score(mom_src, config_params)
     volatility = volatility_score(vol_src, config_params)
     orderbook = orderbook_score(getattr(features, "orderbook", None))

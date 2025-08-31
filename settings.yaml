@@ -11,8 +11,11 @@ prometheus:
   path: /metrics
 data_sources:
   binance_usdm:
-    api_key: null
-    api_secret: null
+    # API credentials removed from file for security. Set via environment before running:
+    #   $env:ULTRA_SIGNALS_DATA_SOURCES__BINANCE_USDM__API_KEY = 'YOUR_KEY'
+    #   $env:ULTRA_SIGNALS_DATA_SOURCES__BINANCE_USDM__API_SECRET = 'YOUR_SECRET'
+    api_key: YOUR_KEY_HERE
+    api_secret: YOUR_SECRET_HERE
 data_quality:
   enabled: true
   max_clock_skew_ms: 250
@@ -46,7 +49,7 @@ data_quality:
     - BINANCE
     - BYBIT
     - OKX
-    max_spread_bps: 12
+    max_spread_bps: 100
     merge_mode: best_bid_ask
   aligners:
     funding_window_sec: 60
@@ -88,39 +91,39 @@ runtime:
   - SUIUSDT
   timeframes:
   - 1m
-  - 3m
   - 5m
   - 15m
   primary_timeframe: 5m
   reconnect_backoff_ms: 2000
   sniper_mode:
     enabled: true
-  mtf_confirm: true            # Enforce MTF confirmation
-  min_confidence: 0.6          # Higher base confidence
-  max_signals_per_hour: 3      # Sniper hourly cap
-  daily_signal_cap: 8          # Daily cap
+  mtf_confirm: true
+  min_confidence: 0.75
+  max_signals_per_hour: 30
+  daily_cap: 200
+  hourly_cap: 2000
   cooldown_bars: 5             # Per-symbol cooldown (bars)
 features:
-  warmup_periods: 2
+  warmup_periods: 200  # Proper warmup for EMA/RSI/ATR initialization
   trend:
-    ema_short: 2
-    ema_medium: 3
-    ema_long: 4
+    ema_short: 20
+    ema_medium: 50
+    ema_long: 200
   momentum:
-    rsi_period: 3
-    macd_fast: 2
-    macd_slow: 3
-    macd_signal: 2
+    rsi_period: 14
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
   volatility:
-    atr_period: 3
-    bbands_period: 3
+    atr_period: 14        # Restored standard ATR period
+    bbands_period: 20     # Standard Bollinger window
     bbands_stddev: 2.0
   volume_flow:
-    vwap_window: 3
+    vwap_window: 20       # Longer VWAP window for smoother signal
     vwap_std_devs:
     - 1.0
     - 2.0
-    volume_z_window: 3
+    volume_z_window: 20   # Longer z-score window for stability
   flow_metrics:
     enabled: true
     cvd:
@@ -174,13 +177,21 @@ regime:
     expansion_atr_pct: 0.7
     crush_atr_pct: 0.2
   liquidity:
-    max_spread_bp: 3.0
+    max_spread_bp: 500.0          # Ultra-relaxed from 50.0 to match other spread settings
     min_volume_z: -1.0
 regime_detection:
   adx_threshold: 22
   chop_volatility: 15
   mean_revert_rsi: 70
   lookback_bars: 50
+
+# Phase-3: Enhanced regime detection settings
+regimes:
+  adx_trend_min: 18              # Minimum ADX for trend regime
+  squeeze_bbkc_ratio_max: 1.1    # Maximum BB/KC ratio for squeeze detection
+  range_adx_max: 14              # Maximum ADX for range regime
+  breakout_vol_burst_z: 1.5      # Volume burst z-score for breakout
+  confirm_htf: ["15m"]           # Higher timeframe confirmation
 alpha_profiles:
   trend:
     alphas:
@@ -188,14 +199,14 @@ alpha_profiles:
     - volume_surge
     - oi_pump
     weight_scale: 1.2
-    min_confidence: 0.6
+    min_confidence: 0.65
   mean_revert:
     alphas:
     - bollinger_fade
     - rsi_extreme
     - cvd_reversal
     weight_scale: 1.1
-    min_confidence: 0.55
+    min_confidence: 0.60
   chop:
     alphas:
     - none
@@ -206,21 +217,21 @@ orderflow:
   cvd_weight: 0.4
   liquidation_weight: 0.3
   liquidity_sweep_weight: 0.3
-  liquidation_threshold: 1000000
+  liquidation_threshold: 500000
   cvd_window: 20
   sweep_imbalance_threshold: 2.5
 position_sizing:
   enabled: true
-  max_risk_pct: 0.02
-  min_confidence: 0.55
+  max_risk_pct: 0.01
+  min_confidence: 0.60
   atr_window: 14
   liq_risk_weight: 0.6
-  skip_high_liq_risk: false
+  skip_high_liq_risk: true
   liq_risk_skip_threshold: 1.5
 liquidation_heatmap:
   enabled: true
   api_source: mock
-  min_cluster_usd: 1000000
+  min_cluster_usd: 500000
   proximity_lookback: 50
 news_veto:
   enabled: true
@@ -232,14 +243,16 @@ volatility_veto:
   enabled: true
   atr_percentile_limit: 0.95
   liq_cluster_sensitivity: high
-  funding_rate_limit: 0.0012   # Stricter funding posture limit (abs)
+  funding_rate_limit: 0.0004   # Tightened from 0.0012 to 0.0004 (0.04%)
 quality_gates:
   enabled: true
+  mtc:
+    enabled: true
   qscore_bins:
     Aplus: 0.85
-    A: 0.75
-    B: 0.65
-    C: 0.55
+    A: 0.80
+    B: 0.70
+    C: 0.60
   bin_actions:
     Aplus:
       size_mult: 1.3
@@ -252,19 +265,19 @@ quality_gates:
       require_extra_confirm: false
     C:
       size_mult: 0.75
-      require_extra_confirm: true
+      require_extra_confirm: false  # Changed from true
     D:
-      size_mult: 0.0
-      require_extra_confirm: true
+      size_mult: 0.5               # Changed from 0.0
+      require_extra_confirm: false  # Changed from true
   weights:
     ensemble_conf: 0.4
     orderflow: 0.2
     regime_fit: 0.2
     expected_rr: 0.2
   veto:
-  # Tighten spread allowance for accuracy
-  max_spread_pct: 0.04
-  max_book_staleness_ms: 2500
+  # Relax spread allowance temporarily
+  max_spread_pct: 0.02         # Tightened to 2% for majors
+  max_book_staleness_ms: 2000
   max_missing_bars: 2
   atr_pct_limit: 0.97
   near_heatmap_bp: 8
@@ -272,7 +285,7 @@ quality_gates:
   corr_leader: BTCUSDT
   corr_lookback: 96
   corr_threshold: 0.75
-  daily_loss_limit_pct: 0.06
+  daily_loss_limit_pct: 0.04
   max_consecutive_losses: 4
   soft:
     ofi_conflict_limit: -0.15
@@ -286,11 +299,11 @@ playbooks:
     breakout:
       enabled: true
       entry:
-        min_conf: 0.62
-        min_adx: 22
-        ema_sep_atr_min: 0.3
+        min_conf: 0.35            # Reduced from 0.62
+        min_adx: 15               # Reduced from 22
+        ema_sep_atr_min: 0.1      # Reduced from 0.3
         of_confirm:
-          cvd: 0.05
+          cvd: 0.01               # Reduced from 0.05
       exit:
         stop_atr_mult: 1.4
         tp_atr_mults:
@@ -306,9 +319,9 @@ playbooks:
     pullback:
       enabled: true
       entry:
-        min_conf: 0.6
-        min_adx: 20
-        ema_sep_atr_min: 0.2
+        min_conf: 0.35            # Reduced from 0.6
+        min_adx: 15               # Reduced from 20
+        ema_sep_atr_min: 0.1      # Reduced from 0.2
         of_confirm:
           cvd: 0.0
       exit:
@@ -327,10 +340,10 @@ playbooks:
     bb_fade:
       enabled: true
       entry:
-        min_conf: 0.58
+        min_conf: 0.35            # Reduced from 0.58
         rsi_extreme:
-        - 28
-        - 72
+        - 35                      # Relaxed from 28
+        - 65                      # Relaxed from 72
         of_confirm:
           liq_cluster_side: long_liq|short_liq
       exit:
@@ -348,7 +361,7 @@ playbooks:
     vwap_revert:
       enabled: true
       entry:
-        min_conf: 0.6
+        min_conf: 0.35            # Reduced from 0.6
         of_confirm:
           sweep: true
       exit:
@@ -387,7 +400,7 @@ weights_profiles:
     orderbook: 0.15
     derivatives: 0.1
 filters:
-  avoid_funding_minutes: 0
+  avoid_funding_minutes: 0    # Disable funding window filter
   atr_gate_pct: 0
   adx_min: 0
   tr_compression_max: 1.0
@@ -403,48 +416,66 @@ engine:
     patterns: 0.0
     pullback_confluence_rs: 0.0
   thresholds:
-    enter: 0.01
-    exit: 0.4
+    enter: 0.0001    # TEMP: Ultra-low entry threshold for testing (restore to 0.01 later)
+    exit: 0.1        # TEMP: Lower exit threshold for testing
   risk:
     max_spread_pct:
-      default: 0.06
+      default: 0.0005              # Tightened to 0.05% expected slippage
       1000SHIBUSDT: 0.1
 ensemble:
-  min_score: 0.6                 # Composite score gate
-  majority_threshold: 0.6        # Require clearer majority
+  min_score: 0.4                 # Reduced from 0.6
+  majority_threshold: 0.5        # Reduced from 0.6
   veto_trend_flip: true
   veto_band_pierce: true
   vote_threshold:                # Legacy normalized_sum threshold
-    trend: 0.55
-    mean_revert: 0.55
-    chop: 0.55
-    mixed: 0.55
-  min_agree:                     # Require 2 agreeing alphas (except chop)
-    trend: 2
-    mean_revert: 2
+    trend: 0.45                  # Reduced from 0.55
+    mean_revert: 0.45            # Reduced from 0.55
+    chop: 0.45                   # Reduced from 0.55
+    mixed: 0.45                  # Reduced from 0.55
+  min_agree:                     # Require fewer agreeing alphas
+    trend: 1                     # Reduced from 2
+    mean_revert: 1               # Reduced from 2
     chop: 1
-    mixed: 2
-  margin_of_victory: 0.12        # Separation in prob mass
-  confidence_floor: 0.6          # Ensemble probability floor
+    mixed: 1                     # Reduced from 2
+  margin_of_victory: 0.08        # Reduced separation from 0.12
+  confidence_floor: 0.65
   use_prob_mass: true
+  # Phase-3: Family-based weighting and calibration
+  family_weights:
+    trend: 0.35
+    momentum: 0.20
+    vol: 0.15
+    flow: 0.20
+    structure: 0.10
+  min_margin: 0.15               # min |w_long - w_short| for a trade
+  calibration:
+    a: 0.0                       # Logistic calibration intercept
+    b: 1.0                       # Logistic calibration slope
 correlation:
-  enabled: true
+  enabled: true                # Enable correlation filtering for live trading
   lookback_periods: 200
   cluster_threshold: 0.7
   hysteresis: 0.1
   refresh_interval_bars: 50
 veto:
-  near_funding_window_min: 0
-  wide_spread_bps: 40            # Tighter spread veto (bps)
-  enable_liq_spike_contra: true  # Enable liquidation spike toxicity veto
-  enable_cvd_alignment: false    # Off until tuned further
-  enable_depth_thin_check: false # Avoid over-filtering initially
+  near_funding_window_min: 15
+  wide_spread_bps: 200             # Hard veto at z-score >= 2.0
+  enable_liq_spike_contra: true
+  enable_cvd_alignment: true
+  enable_depth_thin_check: true
+  vpin_percentile_limit: 0.95
+  kyle_lambda_zscore_limit: 2.0
+  funding_long_block_threshold: 0.0008
+  funding_short_block_threshold: -0.0008
+  oi_shock_sigma_limit: 2.0
+  fomo_spike_zscore_limit: 4.0
 confluence:
   map:
     5m: 15m
     15m: 1h
     1h: 4h
-  require_regime_align: true     # Enforce HTF agreement
+  require_regime_align: true
+  min_regime_probability: 0.60
 alpha:
   funding:
     enabled: true
@@ -468,7 +499,7 @@ alpha:
     exchanges:
     - binance
     - bybit
-    thin_spread_bps: 12
+    thin_spread_bps: 100
     min_top_qty: 0.0
 news_filter:
   enabled: false
@@ -486,6 +517,20 @@ portfolio:
 brakes:
   min_spacing_sec_cluster: 300
   daily_loss_soft_limit_pct: 2.0
+
+# Phase-3: Signal gate settings
+gates:
+  nms_window_bars: 3             # Non-maximum suppression window
+  min_flip_distance_atr: 0.6     # Minimum ATR distance for flip-flop guard
+  cooldown_seconds: 180          # Cooldown between signals
+  exposure:
+    clusters:
+      btc: ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","ADAUSDT"]
+    max_alerts_per_cluster: 1    # Maximum alerts per cluster
+
+# Phase-3: Formatting settings
+formatting:
+  tick_size_overrides: {}        # Optional per-symbol tick sizes
   daily_loss_hard_limit_pct: 4.0
   streak_cooldown_trades: 3
   streak_cooldown_hours: 12
@@ -542,15 +587,11 @@ sizer:
     min_notional: 25
     max_leverage: 10
 execution:
-  mode: ultra_fast
-  max_slippage_pct: 0.05
-  use_orderbook_liquidity: true
-  min_orderbook_depth: 5
-  retry_attempts: 3
-  smart_order_routing: true
-  cancel_stale_orders: true
-  cancel_timeout_sec: 2.5
-  iceberg_orders: false
+  default_leverage: 5  # Conservative leverage for live trading
+  sl_atr_multiplier: 1.8  # Wider stops for live market conditions
+  tp_levels: [1.5, 2.5, 4.0]  # Better risk/reward ratios
+  default_risk_pct: 0.005  # 0.5% risk per trade for live
+  max_position_size: 0.05  # 5% max position size for safety
 portfolio_risk:
   enabled: true
   lookback_bars: 288
@@ -594,10 +635,9 @@ transport:
     enabled: true
     bot_token: null
     chat_id: null
-    send_pre_summary: true
-    send_blocked_signals_in_canary: true
-    message_template: '{pair} | {side} | ENTRY:{entry} | SL:{sl} | TP:{tp} | Lev:{lev}
-      | p:{p_win:.2f} | regime:{regime} | veto:{veto_flags} | code:{reason}'
+    message_template: null
+    send_pre_summary: false
+    send_blocked_signals_in_canary: false
   dry_run: false
 meta_scorer:
   enabled: true
@@ -634,7 +674,7 @@ backtest:
 reports:
   output_dir: reports
 logging:
-  level: INFO   # Reduce noise for canary while surfacing decisions
+  level: INFO    # Raised for debugging; revert to ERROR once stable
 batch_run:
   symbols:
   - BTCUSDT
@@ -876,6 +916,6 @@ shock_detection:
 
 live:
   enabled: true
-  dry_run: true
+  dry_run: false
   exchange: binance_usdm
   hot_reload_profiles: true

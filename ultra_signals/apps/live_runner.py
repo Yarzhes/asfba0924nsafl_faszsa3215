@@ -91,7 +91,13 @@ async def _amain():
 
 def run():
     logger.remove()
+    # Console sink
     logger.add(lambda m: print(m, end=""), level="INFO")
+    # Debug file sink for deeper diagnostics (rotated). Can be removed after troubleshooting.
+    try:
+        logger.add("live_debug.log", level="DEBUG", rotation="5 MB", retention=3, enqueue=True)
+    except Exception:
+        pass
     asyncio.run(_amain())
 
 

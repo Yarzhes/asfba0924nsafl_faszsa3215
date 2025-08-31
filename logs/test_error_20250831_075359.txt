@@ -1,0 +1,29 @@
+# Test Supervisor Error Report
+# Timestamp: 2025-08-31 07:53:59
+# Test Scenario: crash
+# Restart Count: 1/1
+# Total Runtime: 0.1 seconds
+# ==================================================
+
+## Error Details
+Error Type: Exception
+Error Message: Test process exit code: 1
+Error Args: ('Test process exit code: 1',)
+
+## Last 100 Lines of Output
+==================================================
+[2025-08-31 07:53:59] Test program starting...
+[2025-08-31 07:53:59] Traceback (most recent call last):
+[2025-08-31 07:53:59]   File "C:\Users\Almir\Projects\Trading Helper\test_supervisor.py", line 50, in <module>
+[2025-08-31 07:53:59]     main()
+[2025-08-31 07:53:59]     ~~~~^^
+[2025-08-31 07:53:59]   File "C:\Users\Almir\Projects\Trading Helper\test_supervisor.py", line 13, in main
+[2025-08-31 07:53:59]     print(f"\U0001f4ca Arguments: {sys.argv}")
+[2025-08-31 07:53:59]     ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2025-08-31 07:53:59]   File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+[2025-08-31 07:53:59]     return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+[2025-08-31 07:53:59]            ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2025-08-31 07:53:59] UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f4ca' in position 0: character maps to <undefined>
+==================================================
+
+## Restart History

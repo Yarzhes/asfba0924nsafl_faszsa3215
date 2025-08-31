@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import inspect
 import logging
 from typing import Dict, List, Optional
@@ -142,6 +143,27 @@ class FundingProvider:
             return float(last) if last is not None else None
         except Exception:
             return None
+
+    def minutes_to_next(self, symbol: Symbol) -> Optional[int]:
+        """
+        Calculates the minutes to the next funding event.
+        Funding is assumed to occur every 8 hours at 00:00, 08:00, and 16:00 UTC.
+        """
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        funding_hours = [0, 8, 16]
+        next_funding_times = []
+        
+        for hour in funding_hours:
+            next_time = now_utc.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if next_time <= now_utc:
+                next_time += datetime.timedelta(days=1)
+            next_funding_times.append(next_time)
+            
+        next_funding_time = min(next_funding_times)
+        
+        time_diff = next_funding_time - now_utc
+        return int(time_diff.total_seconds() / 60)
 
     def load_replay(self, symbol: Symbol, records: List[Dict]) -> None:
         """

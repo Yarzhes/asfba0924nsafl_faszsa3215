@@ -51,7 +51,7 @@ def _norm_dir(d: str) -> str:
 
 
 def combine_subsignals(
-    subsignals: List[SubSignal], profile: str, settings: Dict
+    subsignals: List[SubSignal], profile: str, settings: Dict, market_context: Dict = None
 ) -> EnsembleDecision:
     """
     Combines sub-signals into a single decision using weighted voting.
@@ -207,8 +207,95 @@ def combine_subsignals(
         side_pm = "FLAT"
 
     # ensemble probability for the chosen side (clean 0..1)
+    # Multi-factor confidence calculation considering various market conditions
     if total_mass > 0 and side_pm != "FLAT":
-        p_ens = (w_long / total_mass) if side_pm == "LONG" else (w_short / total_mass)
+        # Base confidence from signal agreement
+        base_confidence = 0.5
+        
+        # Factor 1: Margin of victory (signal strength)
+        margin_factor = min(margin / total_mass, 0.15)  # Max 15% from margin
+        
+        # Factor 2: Number of agreeing signals (consensus)
+        agree_count = long_voters if side_pm == "LONG" else short_voters
+        total_signals = len(subsignals)
+        consensus_factor = min((agree_count / total_signals) * 0.1, 0.1)  # Max 10% from consensus
+        
+        # Factor 3: Signal quality (average confidence of agreeing signals)
+        agreeing_confidences = []
+        for s in subsignals:
+            s_dir = _norm_dir(getattr(s, "direction", "FLAT"))
+            if s_dir == side_pm:
+                _, prob_c = _signed_and_prob_from_conf(s)
+                agreeing_confidences.append(prob_c)
+        
+        avg_signal_quality = sum(agreeing_confidences) / len(agreeing_confidences) if agreeing_confidences else 0.5
+        quality_factor = (avg_signal_quality - 0.5) * 0.15  # Max ±7.5% from signal quality
+        
+        # Factor 4: Weight distribution (how much total weight supports the decision)
+        winning_weight = w_long if side_pm == "LONG" else w_short
+        weight_factor = min((winning_weight / total_weight) * 0.1, 0.1) if total_weight > 0 else 0  # Max 10%
+        
+        # Factor 5: Market microstructure factors (from market_context if provided)
+        microstructure_factor = 0.0
+        if market_context:
+            # Volume confirmation
+            volume_ratio = market_context.get('volume_ratio', 1.0)  # Current vs average volume
+            if volume_ratio > 1.5:  # High volume confirmation
+                microstructure_factor += 0.05
+            elif volume_ratio < 0.7:  # Low volume penalty
+                microstructure_factor -= 0.03
+            
+            # Spread tightness (lower spread = higher confidence)
+            spread_bps = market_context.get('spread_bps', 5.0)
+            if spread_bps < 2.0:  # Tight spread
+                microstructure_factor += 0.03
+            elif spread_bps > 10.0:  # Wide spread penalty
+                microstructure_factor -= 0.05
+            
+            # Order book depth
+            book_depth_ratio = market_context.get('book_depth_ratio', 1.0)
+            if book_depth_ratio > 1.2:  # Deep book
+                microstructure_factor += 0.02
+            elif book_depth_ratio < 0.8:  # Thin book penalty
+                microstructure_factor -= 0.03
+            
+            # Volatility regime
+            volatility_z = market_context.get('volatility_z', 0.0)
+            if abs(volatility_z) < 1.0:  # Normal volatility
+                microstructure_factor += 0.02
+            elif abs(volatility_z) > 2.0:  # Extreme volatility penalty
+                microstructure_factor -= 0.04
+        
+        # Factor 6: Time-based factors
+        time_factor = 0.0
+        if market_context:
+            # Distance to funding (closer = lower confidence due to noise)
+            mins_to_funding = market_context.get('mins_to_funding', 240)
+            if mins_to_funding < 30:  # Close to funding
+                time_factor -= 0.04
+            elif mins_to_funding > 120:  # Far from funding
+                time_factor += 0.02
+            
+            # Market session (some sessions are more reliable)
+            market_session = market_context.get('market_session', 'unknown')
+            if market_session in ['london_open', 'ny_open']:  # High activity sessions
+                time_factor += 0.03
+            elif market_session in ['asia_close', 'weekend']:  # Low activity sessions
+                time_factor -= 0.02
+        
+        # Factor 7: Regime consistency
+        regime_factor = 0.0
+        if market_context:
+            regime_probability = market_context.get('regime_probability', 0.5)
+            if regime_probability > 0.7:  # Strong regime identification
+                regime_factor += 0.05
+            elif regime_probability < 0.4:  # Weak regime identification
+                regime_factor -= 0.03
+        
+        # Combine all factors
+        p_ens = (base_confidence + margin_factor + consensus_factor + quality_factor + 
+                weight_factor + microstructure_factor + time_factor + regime_factor)
+        p_ens = max(0.0, min(1.0, p_ens))  # Clamp to [0,1]
     else:
         p_ens = 0.0
 

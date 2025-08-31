@@ -97,47 +97,30 @@ def mock_feature_store():
 
 
 @pytest.mark.asyncio
-async def test_sniper_integration_hourly_cap(mock_settings, mock_feature_store):
-    """Test that realtime runner respects sniper hourly cap."""
-    # Skip importing the full realtime_runner to avoid complex dependencies
-    # Instead test the core sniper logic directly
+async def test_sniper_integration_hourly_cap_removed(mock_settings, mock_feature_store):
+    """Hourly cap has been removed: all signals should pass (no SNIPER_HOURLY_CAP blocks)."""
     from ultra_signals.engine.risk_filters import apply_filters
     from ultra_signals.live.metrics import Metrics
-    
-    # Reset counters
+
     reset_sniper_counters()
-    
     metrics = Metrics()
-    processed_signals = []
-    blocked_signals = []
-    
-    # Simulate processing multiple signals
-    for i in range(4):  # More than the cap of 2
+    processed_signals, blocked_signals = [], []
+
+    for i in range(4):  # previously > hourly cap; now all should pass
         signal = make_test_signal(f"BTC{i}USDT")
-        
-        # Apply risk filters (including sniper mode)
-        risk_result = apply_filters(signal, mock_feature_store, mock_settings)
-        
-        if not risk_result.passed:
-            blocked_signals.append((signal, risk_result.reason))
-            # Track sniper rejections in metrics
-            if 'SNIPER' in risk_result.reason:
-                metrics.inc_sniper_rejection(risk_result.reason)
-            continue
-        
-        processed_signals.append(signal)
-    
-    # Assertions
-    assert len(processed_signals) == 2, f"Expected 2 processed signals, got {len(processed_signals)}"
-    assert len(blocked_signals) == 2, f"Expected 2 blocked signals, got {len(blocked_signals)}"
-    
-    # Check that the blocked signals were due to sniper cap
-    hourly_blocks = [reason for _, reason in blocked_signals if 'SNIPER_HOURLY_CAP' in reason]
-    assert len(hourly_blocks) == 2, f"Expected 2 hourly cap blocks, got {len(hourly_blocks)}"
-    
-    # Check metrics
-    snapshot = metrics.snapshot()
-    assert snapshot['counters']['sniper_hourly_cap'] == 2
+        res = apply_filters(signal, mock_feature_store, mock_settings)
+        if not res.passed:
+            blocked_signals.append((signal, res.reason))
+            if 'SNIPER' in res.reason:
+                metrics.inc_sniper_rejection(res.reason)
+        else:
+            processed_signals.append(signal)
+
+    assert len(processed_signals) == 4, f"Expected all signals to pass, got {len(processed_signals)}"
+    assert len(blocked_signals) == 0, f"Expected no blocked signals, got {len(blocked_signals)}"
+    snap = metrics.snapshot()
+    # Hourly counter should remain zero since no hourly cap enforced
+    assert snap['counters']['sniper_hourly_cap'] == 0
 
 
 @pytest.mark.asyncio

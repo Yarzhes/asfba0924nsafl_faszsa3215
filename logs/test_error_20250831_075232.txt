@@ -1,0 +1,40 @@
+# Test Supervisor Error Report
+# Timestamp: 2025-08-31 07:52:32
+# Test Scenario: crash
+# Restart Count: 2/2
+# Total Runtime: 3.3 seconds
+# ==================================================
+
+## Error Details
+Error Type: Exception
+Error Message: Test process exit code: 1
+Error Args: ('Test process exit code: 1',)
+
+## Last 100 Lines of Output
+==================================================
+[2025-08-31 07:52:29] Traceback (most recent call last):
+[2025-08-31 07:52:29]   File "C:\Users\Almir\Projects\Trading Helper\test_supervisor.py", line 50, in <module>
+[2025-08-31 07:52:29]     main()
+[2025-08-31 07:52:29]     ~~~~^^
+[2025-08-31 07:52:29]   File "C:\Users\Almir\Projects\Trading Helper\test_supervisor.py", line 12, in main
+[2025-08-31 07:52:29]     print("\U0001f9ea Test program starting...")
+[2025-08-31 07:52:29]     ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2025-08-31 07:52:29]   File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+[2025-08-31 07:52:29]     return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+[2025-08-31 07:52:29]            ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2025-08-31 07:52:29] UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f9ea' in position 0: character maps to <undefined>
+[2025-08-31 07:52:32] Traceback (most recent call last):
+[2025-08-31 07:52:32]   File "C:\Users\Almir\Projects\Trading Helper\test_supervisor.py", line 50, in <module>
+[2025-08-31 07:52:32]     main()
+[2025-08-31 07:52:32]     ~~~~^^
+[2025-08-31 07:52:32]   File "C:\Users\Almir\Projects\Trading Helper\test_supervisor.py", line 12, in main
+[2025-08-31 07:52:32]     print("\U0001f9ea Test program starting...")
+[2025-08-31 07:52:32]     ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2025-08-31 07:52:32]   File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+[2025-08-31 07:52:32]     return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+[2025-08-31 07:52:32]            ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2025-08-31 07:52:32] UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f9ea' in position 0: character maps to <undefined>
+==================================================
+
+## Restart History
+1. 2025-08-31T07:52:29.697864 - Test exit code: 1

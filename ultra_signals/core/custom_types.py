@@ -49,6 +49,7 @@ class Signal:
     take_profit_2: float = 0.0
     component_scores: Dict[str, float] = field(default_factory=dict)
     features: Dict[str, float] = field(default_factory=dict)
+    vote_detail: Dict = field(default_factory=dict)  # Added for risk filter compatibility
 
     # Sizing information
     notional_size: float = (

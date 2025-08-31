@@ -1,232 +1,186 @@
-# Ultra-Signals: High-Frequency Trading Signal Generation and Backtesting
+# Ultra Signals — Crypto Futures Day-Trading Bot
 
-**Ultra-Signals** is a professional-grade, Python-based framework for developing, testing, and deploying high-frequency trading strategies in cryptocurrency markets. It features a real-time signal generation engine and a comprehensive backtesting suite to ensure strategies are robust and reliable.
+A high-performance, resilient crypto futures day-trading bot with multi-timeframe analysis, real-time signal generation, and automated Telegram notifications.
 
-The project emphasizes performance, modularity, and clean design, utilizing modern Python libraries like `asyncio`, `Pydantic`, `loguru`, and `scikit-learn`.
+## 🚀 Key Features
 
----
-## Key Features
+- **Multi-Timeframe Analysis**: 1m, 5m, 15m timeframe correlation
+- **Resilient Architecture**: Automatic reconnection with exponential backoff
+- **Per-Symbol Isolation**: Prevents signal bursts and ensures proper cooldown
+- **Trader-Focused Notifications**: Clean Telegram messages with entry/SL/TP levels
+- **Real-Time Processing**: WebSocket-based live market data processing
+- **Risk Management**: Built-in position sizing and risk controls
 
-*   **Real-time Signal Engine**: Connects to live exchange data (Binance USDⓈ-M Futures) to compute features and generate trading signals.
-*   **Advanced Feature Library**: Includes a wide range of technical indicators, from standard trend and momentum oscillators to advanced order book and derivatives-based features.
-*   **Comprehensive Backtesting Suite (Sprint 6)**: A powerful command-line interface for strategy validation.
-    *   **Single Run Backtester**: Test strategies over specific historical periods.
-    *   **Walk-Forward Analysis**: Mitigate overfitting by simulating rolling optimization periods with data purging and embargoes.
-    *   **Confidence & Auto-Calibration (Sprint 19)**: Isotonic / Platt probability calibration plus walk-forward Bayesian parameter optimization (Optuna) with composite objective & holdout guard.
-    *   **Detailed Reporting**: Automatically generates performance reports, equity curves, and trade logs.
-*   **Flexible Configuration**: All aspects of the system are controlled via a `settings.yaml` file, with support for environment variable overrides for secrets and CI/CD integration.
+## 🔧 Recent Improvements (v2.0)
 
----
-## Getting Started
+### Stability & Reliability
+- ✅ **Resilient Loop Semantics**: Automatic recovery from WebSocket disconnections
+- ✅ **Heartbeat Monitoring**: Detects stale connections and forces reconnection
+- ✅ **Exponential Backoff**: Intelligent retry logic with configurable limits
+- ✅ **Graceful Shutdown**: Proper cleanup on user interruption
 
-### Prerequisites
+### Signal Quality & Isolation
+- ✅ **Per-Symbol State Tracking**: Each symbol has independent cooldown and state
+- ✅ **Anti-Burst Protection**: Prevents multiple signals for unrelated symbols
+- ✅ **Configurable Cooldowns**: Minimum intervals and consecutive signal limits
+- ✅ **Timeframe Warmup Enforcement**: Only uses fully warmed timeframes
 
-*   Python 3.11+
-*   `venv` for environment management
-*   A C++ compiler (required for some dependencies). On Windows, this can be installed with Visual Studio Build Tools.
+### Trader Experience
+- ✅ **Enhanced Telegram Messages**: Entry price, SL, TP1/TP2/TP3, leverage, risk %
+- ✅ **Risk/Reward Ratios**: Automatic calculation and display
+- ✅ **Clean Format**: No internal debug noise, only actionable information
+- ✅ **Timestamp Tracking**: Clear signal timing information
 
-### 1. Set Up the Environment
+## 📋 Prerequisites
 
-A `Makefile` is provided for convenience. For manual setup on Windows, use the commands below.
+- Python 3.8+
+- Binance API credentials (for live trading)
+- Telegram bot token and chat ID (for notifications)
 
-**Using `make`:**
+## 🛠️ Installation
+
 ```bash
-make setup
-```
+# Clone the repository
+git clone <repository-url>
+cd trading-helper
 
-**Manual Setup (Windows `cmd` or `PowerShell`):**
-```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
+# Install dependencies
 pip install -r requirements.txt
+
+# Set up environment variables
+export ULTRA_SIGNALS_TRANSPORT__TELEGRAM__BOT_TOKEN="your_bot_token"
+export ULTRA_SIGNALS_TRANSPORT__TELEGRAM__CHAT_ID="your_chat_id"
 ```
 
-### 2. Configure the Application
+## 🚀 Running the Bot
 
-Copy the `.env.example` file to `.env` and `settings.yaml.example` to `settings.yaml`.
-
-*   **`.env`**: Add your API keys and secrets here.
-*   **`settings.yaml`**: This is the main configuration file for all modules, including the real-time engine and backtester.
-
----
-## How to Run
-
-### Real-time Engine
-
-To start the live signal generator:
+### Live Mode
 ```bash
-python -m ultra_signals.apps.realtime_runner --config settings.yaml
+# Start the resilient signal runner
+python ultra_signals/apps/realtime_runner.py --config settings.yaml
 ```
 
-### Unit Tests
-
-To verify the system's integrity, run the full test suite:
+### Test Mode (Dry Run)
 ```bash
-pytest -q
+# Run with dry-run enabled (no actual trades)
+python ultra_signals/apps/realtime_runner.py --config settings_canary.yaml
 ```
 
----
-## Backtesting Framework (CLI)
-
-The backtesting CLI is the primary tool for strategy validation.
-
-### 1. Standard Backtest
-
-Run a strategy over a fixed historical period.
+### Testing the Improvements
 ```bash
-# The start/end dates in the command override those in settings.yaml
-python -m ultra_signals.apps.backtest_cli run --config settings.yaml --start 2024-01-01 --end 2024-06-30
+# Run the test suite to verify functionality
+python test_resilient_runner.py
 ```
 
-### 2. Walk-Forward Analysis
+## ⚙️ Configuration
 
-Perform a robust, rolling backtest to assess out-of-sample performance.
-```bash
-python -m ultra_signals.apps.backtest_cli wf --config settings.yaml
-```
+### Key Settings (`settings.yaml`)
 
-### 3. Confidence Calibration
+```yaml
+runtime:
+  symbols: [BTCUSDT, ETHUSDT, SOLUSDT, ...]
+  timeframes: [1m, 5m, 15m]
+  min_signal_interval_sec: 60.0  # Minimum time between signals
+  max_consecutive_signals: 3     # Max signals before cooldown
+  min_confidence: 0.65          # Minimum confidence threshold
 
-Fit a calibration model to align prediction scores with true probabilities.
-```bash
-# This command requires walk-forward analysis to be run first to generate predictions
-python -m ultra_signals.apps.backtest_cli cal --config settings.yaml --method isotonic
-```
+execution:
+  default_leverage: 10
+  sl_atr_multiplier: 1.5        # ATR multiplier for stop loss
+  default_risk_pct: 0.01        # 1% risk per trade
 
-### 4. Auto-Calibration (Sprint 19)
-
-Run Bayesian optimization over strategy knobs using walk-forward evaluation.
-
-1. Create / edit `cal_config.yaml` (see template in repo) to define search space & objective weights.
-2. Run optimization (example):
-```bash
-python -m ultra_signals.apps.backtest_cli cal \
-    --config cal_config.yaml \
-    --optimize \
-    --trials 50 \
-    --study-name demo_btc_5m \
-    --output-dir reports/cal/demo \
-    --holdout-start 2023-06-02 \
-    --holdout-end   2023-07-31
-```
-3. Inspect `reports/cal/demo/` for:
-     - `leaderboard.csv` (all trials)
-     - `best_params.yaml` (flattened tuned keys)
-     - `tuned_params.yaml` + `settings_autotuned.yaml` (full settings snapshot)
-     - `holdout_result.yaml` (PROMOTED / REJECTED)
-    - `opt_history.(png|html)` & `param_importances.(png|html)` if visualization libs available
-4. If holdout status is PROMOTED, adopt `settings_autotuned.yaml` for further backtests.
-
-Composite score balances PF, Winrate, Sharpe, Drawdown (penalized), Stability (1 - PF stdev), with penalties for insufficient trades and overfit gap. Grade distribution (A+/A/B/C/D) is collected; you can optionally add a weight like `grade_good_poor_ratio: 0.05` under `objective.weights` to encourage more high-quality signals.
-
-Parallel optimization: use `--parallel N` (threads) or `--parallel N --parallel-mode process` (multi-process via SQLite study DB) for faster searches when trials are expensive.
-
-### 5. Output Artifacts
-
-All backtesting commands save their results to the `reports/` directory. This includes:
-*   `summary.txt`: Key performance metrics.
-*   `equity_curve.png`: A plot of portfolio value over time.
-*   `trades.csv`: A detailed log of all simulated trades.
-
----
-
-## Project Structure
-
-```
-ultra-signals/
-├── apps/               # Application entry points (realtime, backtest CLI)
-├── backtest/           # Backtesting-specific modules (runner, metrics, etc.)
-├── calibration/        # Confidence + parameter auto-calibration modules (Sprint 19)
-├── core/               # Core components (config, types, utils)
-├── data/               # Data acquisition and providers
-├── engine/             # Signal generation logic (scoring, risk)
-├── features/           # Feature computation modules
-├── reports/            # Default output directory for backtest artifacts
-├── transport/          # Notification services (e.g., Telegram)
-├── tests/              # Unit and integration tests
-├── .env.example        # Example environment variables
-├── settings.yaml       # Main configuration file
-└── requirements.txt    # Project dependencies
-```
-
----
-## Change Log (Excerpt)
-
-* Sprint 19: Added walk-forward Bayesian optimization (Optuna) CLI via `cal --optimize`, composite objective, persistence of tuned settings & holdout validation.
-* Sprint 10: Regime & Market State 2.0 (hysteresis + cooldown + vol/liquidity states) integrated.
-
-## Regime & Market State (Sprint 10)
-
-The engine classifies each bar into a multi-dimensional market state that downstream components (ensemble, playbooks, sizing) consume:
-
-Primary regime: `trend`, `mean_revert`, `chop`
-Vol state: `expansion`, `crush`, `normal` (ATR percentile based)
-Liquidity: `ok`, `thin` (spread & volume z-score)
-
-### How it works
-
-1. Feature inputs: ADX, ATR percentile, EMA separation vs ATR, (optional) Bollinger Band width vs ATR, spread (bps) and volume z-score.
-2. State machine enforces:
-     - Enter / Exit thresholds (separate) for each regime.
-     - Hysteresis: regime candidate must persist N confirmations (hysteresis_hits).
-     - Cooldown: after a confirmed flip we freeze regime for `cooldown_bars` unless a strong trend override triggers.
-3. Confidence: blended normalization of ADX, ATR percentile, EMA separation.
-4. Vol state rules: ATR percentile above `expansion_atr_pct` => expansion; below `crush_atr_pct` => crush.
-5. Liquidity state: flagged thin if spread > `max_spread_bp` or volume z-score < `min_volume_z`.
-
-### Config Snippet
-
-```
-regime:
+transport:
+  telegram:
     enabled: true
-    cooldown_bars: 8
-    strong_override: true
-    hysteresis_hits: 2
-    primary:
-        trend:
-            enter: { adx_min: 24, ema_sep_atr_min: 0.35 }
-            exit:  { adx_min: 18, ema_sep_atr_min: 0.20 }
-        mean_revert:
-            enter: { adx_max: 16, bb_width_pct_atr_max: 0.70 }
-            exit:  { adx_max: 20 }
-        chop:
-            enter: { adx_max: 20 }
-            exit:  { adx_max: 24 }
-    vol:
-        expansion_atr_pct: 0.70
-        crush_atr_pct: 0.20
-    liquidity:
-        max_spread_bp: 3.0
-        min_volume_z: -1.0
+    bot_token: "your_bot_token"
+    chat_id: "your_chat_id"
+    dry_run: false
 ```
 
-### Access
+## 📊 Telegram Message Format
 
-The latest structured regime object is stored per-bar inside the FeatureStore under key `regime` and exposed in engine vote_detail as:
+The bot now sends clean, trader-focused messages:
 
 ```
-"regime": { "primary": "trend", "vol": "normal", "liq": "ok", "confidence": 0.72 }
+📈 LONG BTCUSDT (5m)
+Confidence: 75.0%
+
+📍 Entry: $50000.0000
+🛑 Stop Loss: $48500.0000
+🎯 TP1: $51500.0000
+🎯 TP2: $52250.0000
+🎯 TP3: $53000.0000
+⚡ Leverage: 10x
+⚠️ Risk: 1.00%
+📊 R:R = 1:1.00
+🕐 Time: 2025-08-30 08:35:00 UTC
+💡 Reason: Trend up + pullback to VWAP
 ```
 
-You can query it directly:
+## 🔍 Monitoring & Debugging
 
-```python
-fs.get_regime_state(symbol, timeframe)       # latest
-fs.get_regime(symbol, timeframe, ts_ms)      # at or before timestamp
+### Log Levels
+- **INFO**: Signal generation, notifications sent
+- **DEBUG**: Feature calculations, timeframe readiness
+- **WARNING**: Reconnection attempts, insufficient data
+- **ERROR**: Connection failures, processing errors
+
+### Key Log Messages
+- `Timeframe BTCUSDT/15m now ready with 250 bars` - Warmup complete
+- `Signal sent for BTCUSDT: LONG @ 0.750` - Signal notification
+- `Reconnecting in 4.0s (attempt 2/5)` - Recovery in progress
+
+## 🧪 Testing
+
+Run the comprehensive test suite:
+
+```bash
+python test_resilient_runner.py
 ```
 
-### Logging
+Tests cover:
+- ✅ Per-symbol state tracking
+- ✅ SL/TP calculation accuracy
+- ✅ Cooldown and isolation logic
+- ✅ Timeframe readiness checking
+- ✅ Message formatting
 
-Each bar emits a ribbon style debug line:
-```
-[REGIME] ts=... prim=trend(0.72) vol=normal liq=ok cooldown=3/8
-```
-Cool-down progress counts down (left/total) while flips are frozen.
+## 🚨 Troubleshooting
 
-### Ensemble Integration
+### Bot Stops Unexpectedly
+- Check WebSocket connection logs
+- Verify API credentials
+- Monitor system resources
 
-The ensemble automatically uses the active regime as its profile (fallback `mixed`). Thresholds like `vote_threshold`, `min_agree`, and `confidence_floor` can be provided per-regime under `ensemble`.
+### No Signals Generated
+- Check timeframe warmup status
+- Verify confidence thresholds
+- Review risk filter settings
 
-### Testing
+### Telegram Notifications Not Working
+- Verify bot token and chat ID
+- Check network connectivity
+- Review dry-run settings
 
-Unit tests in `tests/test_regime_detector.py` cover trend, mean-revert, chop, vol states, liquidity, hysteresis & cooldown stability.
+## 📈 Performance Metrics
+
+The resilient runner provides:
+- **Uptime**: Automatic recovery from disconnections
+- **Signal Quality**: Per-symbol isolation prevents noise
+- **Latency**: Real-time processing with minimal delays
+- **Reliability**: Exponential backoff and heartbeat monitoring
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+---
+
+**Note**: This is a trading bot and involves financial risk. Use at your own discretion and ensure proper risk management.

@@ -615,7 +615,7 @@ class FeatureStore:
             logger.exception("flow_metrics feature error: {}", e)
 
         self._feature_cache[symbol][timeframe][timestamp] = feature_dict
-        logger.debug(
+        logger.info(
             "Computed features (store id={}) for {} {} at {}: {}",
             id(self), symbol, timeframe, timestamp, feature_dict
         )

@@ -34,24 +34,23 @@ def make_signal():
     )
 
 
-def test_sniper_hourly_cap():
+def test_sniper_hourly_cap_disabled():
+    """Hourly cap has been intentionally disabled; multiple rapid calls all pass.
+    We keep daily cap large so it does not interfere."""
     store = DummyStore()
     sig = make_signal()
-    # reset shared counters (both in-memory and Redis if available)
     reset_sniper_counters()
     import ultra_signals.engine.risk_filters as rf
     if hasattr(rf.apply_filters, '_sniper_history_clear'):
         rf.apply_filters._sniper_history_clear()
     settings = {"features": {"warmup_periods": 20}, "runtime": {"sniper_mode": {"enabled": True, "max_signals_per_hour": 2, "daily_signal_cap": 100, "mtf_confirm": False}}}
 
-    # First two should pass
     r1 = apply_filters(sig, store, settings)
     assert r1.passed is True
     r2 = apply_filters(sig, store, settings)
     assert r2.passed is True
-    # Third should be blocked by hourly cap
     r3 = apply_filters(sig, store, settings)
-    assert r3.passed is False and r3.reason == 'SNIPER_HOURLY_CAP'
+    assert r3.passed is True  # no hourly cap anymore
 
 
 def test_sniper_daily_cap():

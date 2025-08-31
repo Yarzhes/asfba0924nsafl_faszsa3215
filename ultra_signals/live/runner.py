@@ -20,6 +20,7 @@ from .order_exec import OrderExecutor
 from .state_store import StateStore
 from .safety import SafetyManager
 from .metrics import Metrics
+from ultra_signals.core.feature_store import FeatureStore
 from ultra_signals.persist.db import init_db as persist_init_db, snapshot_settings_fingerprint, fetchone as persist_fetchone, upsert_order_pending
 from ultra_signals.orderflow.persistence import FeatureViewWriter
 from ultra_signals.persist.migrations import apply_migrations as persist_apply_migrations
@@ -65,6 +66,21 @@ class LiveRunner:
         )
         self.metrics = Metrics()
         self.feed = FeedAdapter(settings, self.feed_q, venue_router=None)
+        # Instantiate a FeatureStore so risk filters have OHLCV + feature context.
+        try:
+            warm = int(getattr(settings.features, 'warmup_periods', 20)) if hasattr(settings, 'features') else 20
+        except Exception:
+            warm = 20
+        try:
+            self.feature_store = FeatureStore(warmup_periods=warm, settings=settings.model_dump() if hasattr(settings,'model_dump') else getattr(settings,'__dict__', {}))
+        except Exception:
+            self.feature_store = None
+        # Attach to feed & engine if available
+        try:
+            if self.feature_store is not None:
+                self.feed.feature_store = self.feature_store  # type: ignore
+        except Exception:
+            pass
         # feature writer for execution telemetry (VWAP/TWAP slices)
         fv_path = getattr(live_cfg, 'feature_view_path', 'orderflow_features.db') if live_cfg else 'orderflow_features.db'
         try:
@@ -113,6 +129,9 @@ class LiveRunner:
             pass
         try:
             self.engine.feed_ref = self.feed  # for composite mid & DQ context
+            if self.feature_store is not None:
+                # Provide direct convenience pointer for filters (fallback path in engine)
+                setattr(self.engine, 'feature_store', self.feature_store)
         except Exception:
             pass
         # Heuristic: during dry-run + http metrics exporter tests, avoid starting network feed to prevent timeouts
@@ -256,10 +275,40 @@ class LiveRunner:
             logger.error(f"[LiveRunner] leadership lock error {e}")
 
     def _check_env(self):
-        if not self.settings.live.dry_run:
-            src = self.settings.data_sources.get("binance", None)
-            if not src or not src.api_key or not src.api_secret:
-                raise RuntimeError("API keys missing for live mode")
+        """Validate API key presence when running in live (non-dry-run) mode.
+
+        Historically we referenced the data source key 'binance', but the
+        default YAML (and env overrides) now use 'binance_usdm'. To remain
+        backwards compatible with tests or older configs, we search a small
+        ordered list of candidate keys. The first one that exists is used.
+
+        Environment variable override patterns supported (any of):
+          - ULTRA_SIGNALS_DATA_SOURCES__BINANCE_USDM__API_KEY / API_SECRET
+          - ULTRA_SIGNALS_DATA_SOURCES__BINANCE__API_KEY / API_SECRET
+          - BINANCE_API_KEY / BINANCE_API_SECRET (mapped earlier by CLI wrapper)
+        """
+        live_cfg = getattr(self.settings, 'live', None)
+        if not live_cfg or getattr(live_cfg, 'dry_run', True):  # skip validation in dry-run
+            return
+        # Determine the configured exchange key (defaults to binance_usdm) and fallback aliases
+        exchange_key = getattr(live_cfg, 'exchange', 'binance_usdm') or 'binance_usdm'
+        candidates = [exchange_key, 'binance_usdm', 'binance']
+        src = None
+        for key in candidates:
+            try:
+                ds = self.settings.data_sources.get(key)  # type: ignore[attr-defined]
+            except Exception:
+                ds = None
+            if ds:
+                src = ds
+                break
+        if not src or not getattr(src, 'api_key', None) or not getattr(src, 'api_secret', None):
+            # Provide actionable guidance
+            raise RuntimeError(
+                "API keys missing for live mode. Set them via .env or environment variables: "
+                f"ULTRA_SIGNALS_DATA_SOURCES__{exchange_key.upper()}__API_KEY / API_SECRET or BINANCE_API_KEY / BINANCE_API_SECRET. "
+                f"Checked candidates={candidates}"
+            )
 
     async def start(self):
         self._check_env()

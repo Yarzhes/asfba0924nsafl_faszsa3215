@@ -17,6 +17,7 @@ Design Principles:
 """
 
 import json
+import re
 from typing import Dict, List, Optional
 import asyncio
 import httpx
@@ -27,8 +28,9 @@ from ultra_signals.core.custom_types import EnsembleDecision
 
 # --- helpers -----------------------------------------------------------------
 
-def _escape_markdown_v2(text: str) -> str:  # retained for backward compatibility (unused now)
-    return text
+def _escape_markdown_v2(text: str) -> str:
+    """Escape characters for Telegram MarkdownV2."""
+    return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", text)
 
 
 def _chunk_for_telegram(text: str, limit: int = 4096) -> List[str]:
@@ -50,127 +52,159 @@ def _chunk_for_telegram(text: str, limit: int = 4096) -> List[str]:
     return parts
 
 
-def _format_veto_block(decision: EnsembleDecision) -> str:
+def _calculate_sl_tp(entry_price: float, decision: str, atr: float, settings: Dict) -> Dict[str, float]:
     """
-    Shows explicit top veto reason (Sprint 8 requirement) and full list if available.
-    Sprint 9 adds new reasons like: NEWS_WINDOW, CVD_WEAK, DEPTH_THIN, LIQUIDATION_SPIKE, NEAR_FUNDING_WINDOW.
+    Calculate Stop Loss and Take Profit levels based on ATR.
+    
+    Args:
+        entry_price: Entry price
+        decision: "LONG" or "SHORT"
+        atr: Average True Range value
+        settings: Application settings for SL/TP configuration
+    
+    Returns:
+        Dict with 'stop_loss', 'tp1', 'tp2', 'tp3', 'risk_amount' values
     """
-    if not getattr(decision, "vetoes", None):
-        return ""
-    vetoes = list(decision.vetoes or [])
-    block = ""
-    if len(vetoes) > 0:
-        block += f"🚨 *VETOED* — Top reason: `{vetoes[0]}`\n"
-        if len(vetoes) > 1:
-            block += f"All reasons: `{', '.join(vetoes)}`\n"
-    else:
-        block += "🚨 *VETOED*\n"
-    return block
+    # Get SL multiplier from settings (default 1.5)
+    sl_multiplier = settings.get('execution', {}).get('sl_atr_multiplier', 1.5)
+    
+    # Calculate stop loss
+    if decision == "LONG":
+        stop_loss = entry_price - (sl_multiplier * atr)
+    else:  # SHORT
+        stop_loss = entry_price + (sl_multiplier * atr)
+    
+    # Calculate risk amount
+    risk_amount = abs(entry_price - stop_loss)
+    
+    # Calculate take profit levels (1R, 1.5R, 2R)
+    if decision == "LONG":
+        tp1 = entry_price + (1.0 * risk_amount)
+        tp2 = entry_price + (1.5 * risk_amount)
+        tp3 = entry_price + (2.0 * risk_amount)
+    else:  # SHORT
+        tp1 = entry_price - (1.0 * risk_amount)
+        tp2 = entry_price - (1.5 * risk_amount)
+        tp3 = entry_price - (2.0 * risk_amount)
+    
+    return {
+        'stop_loss': stop_loss,
+        'tp1': tp1,
+        'tp2': tp2,
+        'tp3': tp3,
+        'risk_amount': risk_amount
+    }
 
 
-def _format_filter_details(decision: EnsembleDecision) -> str:
-    """
-    Optional Sprint-9 diagnostics section if your engine attaches details like:
-    - cvd_slope
-    - spread_bps, top_qty
-    - liq_z
-    - mins_to_funding
-    """
-    det = getattr(decision, "filter_details", None) or getattr(decision, "details", None)
-    if not isinstance(det, dict) or len(det) == 0:
-        return ""
-
-    lines = []
-    # Only show if present; keep short
-    if "cvd_slope" in det:
-        lines.append(f"CVD slope: `{det.get('cvd_slope'):0.3f}`")
-    if "spread_bps" in det:
-        lines.append(f"Spread(bps): `{det.get('spread_bps'):0.2f}`")
-    if "top_qty" in det:
-        lines.append(f"Top qty: `{det.get('top_qty'):0.1f}`")
-    if "liq_z" in det:
-        lines.append(f"Liq Z: `{det.get('liq_z'):0.2f}`")
-    if "mins_to_funding" in det and det.get("mins_to_funding") is not None:
-        lines.append(f"Mins→funding: `{int(det.get('mins_to_funding'))}`")
-
-    if not lines:
-        return ""
-
-    return "*Filters:* " + " | ".join(lines) + "\n"
+def _get(d, key, default_key):
+    """Helper to get value from nested dict with fallback."""
+    return d.get(key, d.get(default_key, None))
 
 
 def format_message(decision: EnsembleDecision, settings: Dict, is_canary_debug: bool = False) -> str:
-    """Simplified, high‑readability Telegram message.
-
-    Removed: profile / regime / veto / latency / filter diagnostics to cut noise.
-    Focus: direction, confidence, vote ratio, and clean entry/SL/TP block with deltas.
-    """
+    """Clean trader-focused Telegram message with essential trade information."""
+    
+    # Direction icon and header
     icon = "📈" if decision.decision == "LONG" else "📉" if decision.decision == "SHORT" else "⚪"
     msg = f"{icon} *{decision.decision} {decision.symbol}* ({decision.tf})\n"
+    
+    # Confidence score
     try:
-        msg += f"Confidence: *{decision.confidence:.2%}*\n"
+        msg += f"*Confidence: {decision.confidence:.1%}*\n\n"
     except Exception:
-        pass
+        msg += "\n"
 
-    vd = decision.vote_detail or {}
-    # Vote ratio
+    # Extract trade execution details
     try:
-        a = vd.get('agree'); t = vd.get('total')
-        if a is not None and t is not None:
-            msg += f"Vote {a}/{t}\n"
-    except Exception:
-        pass
+        vd = decision.vote_detail or {}
+        risk_model = vd.get('risk_model', {})
+        playbook = vd.get('playbook', {})
+        
+        # Get current price as entry
+        entry_price = (_get(risk_model, 'entry_price', 'entry_price') or 
+                      _get(playbook, 'entry_price', 'entry_price') or
+                      _get(vd, 'current_price', 'price'))
+        
+        if entry_price:
+            msg += f"📍 *Entry:* ${entry_price:.4f}\n"
+            
+            # Calculate SL/TP levels if not already provided
+            atr = _get(risk_model, 'atr', 'atr') or _get(playbook, 'atr', 'atr')
+            if atr:
+                sl_tp_levels = _calculate_sl_tp(entry_price, decision.decision, atr, settings)
+                
+                # Stop loss
+                msg += f"🛑 *Stop Loss:* ${sl_tp_levels['stop_loss']:.4f}\n"
+                
+                # Take profit levels
+                msg += f"🎯 *TP1:* ${sl_tp_levels['tp1']:.4f}\n"
+                msg += f"🎯 *TP2:* ${sl_tp_levels['tp2']:.4f}\n"
+                msg += f"🎯 *TP3:* ${sl_tp_levels['tp3']:.4f}\n"
+                
+                # Risk/Reward ratio
+                risk_amount = sl_tp_levels['risk_amount']
+                reward_amount = abs(sl_tp_levels['tp1'] - entry_price)
+                
+                if risk_amount > 0:
+                    rr_ratio = reward_amount / risk_amount
+                    msg += f"📊 *R:R = 1:{rr_ratio:.2f}*\n"
+        
+        # Leverage
+        leverage = (_get(risk_model, 'leverage', 'leverage') or 
+                   _get(playbook, 'leverage', 'leverage') or
+                   settings.get('execution', {}).get('default_leverage', 10))
+        msg += f"⚡ *Leverage:* {leverage}x\n"
+        
+        # Risk percentage
+        risk_pct = (_get(risk_model, 'risk_percentage', 'risk_pct') or 
+                   _get(playbook, 'risk_percentage', 'risk_pct') or
+                   settings.get('position_sizing', {}).get('max_risk_pct', 0.01))
+        msg += f"⚠️ *Risk:* {risk_pct:.2%}\n"
+        
+        # Timestamp
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+        msg += f"🕐 *Time:* {timestamp}\n"
+        
+        # Optional: Brief rationale (one line only)
+        rationale = _get(vd, 'rationale', 'reason')
+        if rationale and len(rationale) < 100:  # Keep it short
+            msg += f"💡 *Reason:* {rationale}\n"
+    
+    except Exception as e:
+        logger.debug(f"Error extracting trade details: {e}")
+        # Fallback minimal message
+        msg += "⚠️ Trade details unavailable\n"
 
-    # Entry / SL / TP block
-    try:
-        if all(k in vd for k in ('entry','sl','tp')):
-            entry = float(vd.get('entry'))
-            sl = float(vd.get('sl'))
-            tp = float(vd.get('tp'))
-            lev = vd.get('lev')
-            risk_pct = vd.get('risk_pct')
-            rr = vd.get('rr')
-            sl_delta = ((sl-entry)/entry)*100 if entry else 0.0
-            tp_delta = ((tp-entry)/entry)*100 if entry else 0.0
-            msg += (
-                f"Entry  {entry:.4f}\n"
-                f"SL     {sl:.4f} ({sl_delta:+.2f}%)\n"
-                f"TP     {tp:.4f} ({tp_delta:+.2f}%)\n"
-            )
-            tail = []
-            if lev is not None:
-                try: tail.append(f"Lev {float(lev):.1f}x")
-                except Exception: pass
-            if risk_pct is not None:
-                try: tail.append(f"Risk {float(risk_pct):.2f}%")
-                except Exception: pass
-            if rr is not None:
-                try: tail.append(f"RR {float(rr):.2f}")
-                except Exception: pass
-            if tail:
-                msg += " | ".join(tail) + "\n"
-    except Exception:
-        pass
-
-    # Sub‑signals single line
-    subs = []
-    for sub in getattr(decision, 'subsignals', []) or []:
-        try:
-            s_icon = '🟢' if sub.direction == 'LONG' else '🔴' if sub.direction == 'SHORT' else '⚪'
-            subs.append(f"{s_icon}{sub.strategy_id}({float(getattr(sub,'confidence_calibrated',0.0)):.2f})")
-        except Exception:
-            continue
-    if subs:
-        msg += "Signals: " + ", ".join(subs) + "\n"
-
-    # Reason for flat (only if explicitly asked for blocked debug)
-    if is_canary_debug and decision.decision == 'FLAT':
-        reason = vd.get('reason')
-        if reason:
-            msg += f"Reason: {reason}\n"
-
-    # Plain text return (no Markdown parse mode to maximize readability)
     return msg
+
+
+def format_arbitrage_message(fs) -> str:
+    """Format arbitrage opportunity message."""
+    if not fs.executable_spreads:
+        return f"Arb: No spread {fs.symbol}"
+    
+    # Choose best by largest raw spread
+    best = max(fs.executable_spreads, key=lambda e: e.raw_spread_bps)
+    
+    # Pick a standard bucket (25k) if present
+    exec25 = best.exec_spread_bps_by_notional.get('25000') or next(iter(best.exec_spread_bps_by_notional.values()))
+    
+    parts = [
+        f"Arb: Perp spread {best.raw_spread_bps:.2f} bps (exec {exec25:.2f} bps @ $25k) {best.venue_short.upper()}>{best.venue_long.upper()}"
+    ]
+    
+    if fs.funding:
+        # Naive funding diff: max - min current
+        cur_rates = [f.current_rate_bps for f in fs.funding if f.current_rate_bps is not None]
+        if len(cur_rates) >= 2:
+            diff = max(cur_rates) - min(cur_rates)
+            parts.append(f"Funding diff {diff:.2f} bps/8h")
+    
+    if fs.geo_premium:
+        parts.append(f"Geo prem {fs.geo_premium.region_a} {fs.geo_premium.premium_bps:.2f} bps vs {fs.geo_premium.region_b}")
+    
+    return ' | '.join(parts)
 
 
 async def send_message(text: str, settings: Dict):
@@ -183,88 +217,116 @@ async def send_message(text: str, settings: Dict):
     """
     # --- DRY RUN support (from your docstring) -------------------------------
     # If settings['telegram'].dry_run is True, don't actually send—just log.
-    tg_settings = settings['telegram']
+    tg_settings = settings.get('telegram', {})
     dry_run = bool(tg_settings.get('dry_run', False))
     if dry_run:
         logger.info("[Telegram dry-run] Message not sent:\n" + text)
         return
     # ------------------------------------------------------------------------
 
-    if not tg_settings['enabled']:
+    if not tg_settings.get('enabled', False):
         logger.debug("Telegram transport is disabled in settings.")
         return
 
     token = tg_settings.get('bot_token')
     chat_id = tg_settings.get('chat_id')
-
+    
     if not token or not chat_id:
-        logger.error("Telegram sending enabled, but bot_token or chat_id is missing.")
+        logger.warning("Telegram bot_token or chat_id not configured.")
         return
 
+    # Rate limiting: Add jitter to prevent burst sends
+    import random
+    import time
+    await asyncio.sleep(random.uniform(0.1, 0.5))
+
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-    # Chunk if too long
-    messages = _chunk_for_telegram(text)
-
-    max_retries = 3
-    base_delay = 2  # seconds
-
-    async with httpx.AsyncClient() as client:
-        for idx, chunk in enumerate(messages, start=1):
-            payload = {
-                "chat_id": chat_id,
-                "text": chunk,  # plain text for readability
-            }
-
-            for attempt in range(max_retries):
-                try:
-                    response = await client.post(url, json=payload, timeout=15)
-
-                    if response.status_code == 429:  # Rate limited
-                        retry_after = int(response.headers.get("Retry-After", base_delay * (2 ** attempt)))
-                        logger.warning(f"Rate limited by Telegram. Retrying in {retry_after}s...")
-                        await asyncio.sleep(retry_after)
-                        continue
-
-                    response.raise_for_status()
-                    response_data = response.json()
-                    msg_id = response_data.get('result', {}).get('message_id')
-                    logger.success(f"Successfully sent Telegram message part {idx}/{len(messages)} id={msg_id} to chat {chat_id}.")
-                    break  # next chunk
-
-                except httpx.HTTPStatusError as e:
-                    logger.error(
-                        f"Telegram API error (attempt {attempt + 1}/{max_retries}, part {idx}/{len(messages)}): "
-                        f"Status {e.response.status_code}, Response: {e.response.text[:200]}"
-                    )
-                except httpx.RequestError as e:
-                    logger.error(f"Network error sending to Telegram (attempt {attempt + 1}/{max_retries}, part {idx}/{len(messages)}): {e}")
-
+    
+    # Split message if too long
+    chunks = _chunk_for_telegram(text)
+    
+    for i, chunk in enumerate(chunks):
+        payload = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }
+        
+        max_retries = 3
+        retry_delay = 1.0
+        
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(url, json=payload)
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        if result.get('ok'):
+                            logger.info(f"Telegram message sent successfully (chunk {i+1}/{len(chunks)})")
+                            break
+                        else:
+                            logger.error(f"Telegram API error: {result.get('description', 'Unknown error')}")
+                            break
+                    elif response.status_code == 429:
+                        # Rate limited - wait and retry
+                        retry_after = response.json().get('parameters', {}).get('retry_after', 30)
+                        logger.warning(f"Telegram rate limited, waiting {retry_after}s")
+                        await asyncio.sleep(retry_after + random.uniform(0, 2))  # Add jitter
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        logger.error(f"Telegram HTTP error {response.status_code}: {response.text}")
+                        break
+                        
+            except Exception as e:
+                logger.error(f"Telegram send error (attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)
-                    logger.info(f"Waiting {delay}s before retrying...")
-                    await asyncio.sleep(delay)
-            else:
-                logger.error("Failed to send message to Telegram after multiple retries.")
-                return
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    logger.error("Failed to send Telegram message after all retries")
 
 
-# --- convenience wrapper ------------------------------------------------------
+def send_decision(decision: EnsembleDecision, settings: Dict):
+    """Send a formatted decision message to Telegram."""
+    try:
+        message = format_message(decision, settings)
+        asyncio.create_task(send_message(message, settings))
+        logger.info(f"Decision sent to Telegram: {decision.symbol} {decision.decision}")
+    except Exception as e:
+        logger.error(f"Error sending decision to Telegram: {e}")
 
-async def send_decision(decision: EnsembleDecision, settings: Dict):
-    """
-    Convenience wrapper: format the decision and send it (honors dry_run).
-    Also handles sending of blocked signals for canary debugging.
-    """
-    tg_settings = settings.get('telegram', {})
-    send_blocked = tg_settings.get('send_blocked_signals_in_canary', False)
-    is_canary_debug = send_blocked
 
-    # Standard logic: only send non-flat decisions
-    if decision.decision in ("LONG", "SHORT"):
-        text = format_message(decision, settings, is_canary_debug=False)
-        await send_message(text, settings)
-    # Canary debug logic: if enabled, send FLAT decisions that were vetoed
-    elif send_blocked and decision.decision == "FLAT" and getattr(decision, "vetoes", None):
-        text = format_message(decision, settings, is_canary_debug=True)
-        await send_message(text, settings)
+if __name__ == "__main__":
+    # Test the module
+    print("Testing Telegram module...")
+    
+    # Mock decision for testing
+    mock_decision = EnsembleDecision(
+        symbol="BTCUSDT",
+        decision="LONG",
+        confidence=0.75,
+        tf="5m",
+        vote_detail={
+            'risk_model': {
+                'entry_price': 50000.0,
+                'atr': 1000.0
+            }
+        }
+    )
+    
+    mock_settings = {
+        'execution': {
+            'sl_atr_multiplier': 1.5,
+            'default_leverage': 10
+        },
+        'position_sizing': {
+            'max_risk_pct': 0.01
+        }
+    }
+    
+    # Test message formatting
+    message = format_message(mock_decision, mock_settings)
+    print("Formatted message:")
+    print(message)

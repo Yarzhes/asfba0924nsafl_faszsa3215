@@ -613,7 +613,50 @@ class RealSignalEngine:
             _trace_engine_flat(symbol, tf, ts_epoch, dec, "router_filtered_all")
             return dec
 
-        final_decision = ensemble.combine_subsignals(subsignals, current_regime, self.settings)
+        # Build comprehensive market context for confidence calculation
+        market_context = {}
+        try:
+            # Volume analysis
+            if len(ohlcv_segment) >= 20:
+                recent_volume = ohlcv_segment['volume'].tail(5).mean()
+                avg_volume = ohlcv_segment['volume'].tail(20).mean()
+                market_context['volume_ratio'] = recent_volume / avg_volume if avg_volume > 0 else 1.0
+            
+            # Spread from orderbook features
+            if orderbook_features:
+                market_context['spread_bps'] = getattr(orderbook_features, 'spread_bps', 5.0)
+                market_context['book_depth_ratio'] = getattr(orderbook_features, 'depth_ratio', 1.0)
+            
+            # Volatility regime
+            if volatility_features:
+                atr = getattr(volatility_features, 'atr', 0.0)
+                atr_sma = getattr(volatility_features, 'atr_sma', atr)
+                market_context['volatility_z'] = (atr - atr_sma) / atr_sma if atr_sma > 0 else 0.0
+            
+            # Funding timing
+            if funding_features:
+                market_context['mins_to_funding'] = getattr(funding_features, 'mins_to_funding', 240)
+            
+            # Market session (basic time-based)
+            import datetime
+            utc_hour = datetime.datetime.utcnow().hour
+            if 8 <= utc_hour <= 10:
+                market_context['market_session'] = 'london_open'
+            elif 13 <= utc_hour <= 15:
+                market_context['market_session'] = 'ny_open'
+            elif 0 <= utc_hour <= 2:
+                market_context['market_session'] = 'asia_close'
+            else:
+                market_context['market_session'] = 'regular'
+            
+            # Regime probability
+            if regime_features:
+                market_context['regime_probability'] = getattr(regime_features, 'probability', 0.5)
+                
+        except Exception as e:
+            logger.debug(f"Error building market context: {e}")
+        
+        final_decision = ensemble.combine_subsignals(subsignals, current_regime, self.settings, market_context)
         # Sprint 14: apply order flow confidence modulation post-ensemble but pre-risk sizing.
         if final_decision and of_snapshot and final_decision.decision in ("LONG", "SHORT"):
             try:
